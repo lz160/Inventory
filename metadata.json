@@ -1,0 +1,8 @@
+{
+  "name": "进货单智能核对与验货工作台",
+  "description": "专业进货单多维核对系统，支持品名、条码、数量、优惠价与单价2多维比对，具备条码扫码快验、差异智能归集、破损登记与进货报告导出功能。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

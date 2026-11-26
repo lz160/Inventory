@@ -1,10 +1,15 @@
 import express, { Express, Request } from 'express';
 import {
   MetaStore,
+  type InventoryTable,
   StoreSessionInfo,
   UserSessionInfo,
   getMetaStore,
 } from './core/db/metaStore';
+import type { IdentityStore } from './core/db/identityStore';
+import { isHostedSqlEnabled } from './core/db/hostedSql';
+import { HostedProductMetadataStore } from './core/db/productMetadataStore';
+import { SqlIdentityStore } from './core/db/sqlIdentityStore';
 import { SqliteSandbox, getSqliteSandbox } from './core/db/sqliteSandbox';
 import {
   DbTarget,
@@ -44,6 +49,7 @@ import {
   SqliteInventoryRepository,
 } from './modules/inventory/repository';
 import { InventoryService } from './modules/inventory/service';
+import { createReceivingRouter } from './modules/receiving/routes';
 import { createInventoryRouter } from './modules/inventory/routes';
 import {
   MssqlStocktakeRepository,
@@ -62,6 +68,7 @@ export interface MountImsOptions {
   dbMode?: 'mssql' | 'sqlite-seed';
   sandbox?: SqliteSandbox;
   metaStore?: MetaStore;
+  identityStore?: IdentityStore;
 }
 
 export function extractBearerToken(req: Request): string {
@@ -71,10 +78,10 @@ export function extractBearerToken(req: Request): string {
   return match ? match[1].trim() : '';
 }
 
-export function createUserAuthMiddleware(metaStore: MetaStore): express.RequestHandler {
-  return (req, _res, next) => {
+export function createUserAuthMiddleware(metaStore: IdentityStore): express.RequestHandler {
+  return asyncHandler(async (req, _res, next) => {
     const token = extractBearerToken(req);
-    const session = metaStore.verifyUserSessionToken(token);
+    const session = await metaStore.verifyUserSessionToken(token);
     if (!session) {
       return next(unauthorizedError('未登录或账户会话已过期，请先登录'));
     }
@@ -89,11 +96,23 @@ export function createUserAuthMiddleware(metaStore: MetaStore): express.RequestH
       } satisfies StoreSessionInfo;
     }
     return next();
+  });
+}
+
+async function getRequestOverrides(metaStore: IdentityStore, storeId: number) {
+  const [sklad, saledata] = await Promise.all([
+    metaStore.getDbOverride('sklad', storeId),
+    metaStore.getDbOverride('saledata', storeId),
+  ]);
+  const configs = { sklad, saledata };
+  return {
+    configs,
+    getDbOverride: (target: DbTarget, id?: number | null) => id === storeId ? configs[target] : null,
   };
 }
 
-export function createStoreSelectedMiddleware(metaStore: MetaStore): express.RequestHandler {
-  return (req, _res, next) => {
+export function createStoreSelectedMiddleware(metaStore: IdentityStore): express.RequestHandler {
+  return asyncHandler(async (req, _res, next) => {
     const session = (req as any).userSession as UserSessionInfo | undefined;
     if (!session) {
       return next(unauthorizedError('未登录或账户会话已过期，请先登录'));
@@ -101,12 +120,13 @@ export function createStoreSelectedMiddleware(metaStore: MetaStore): express.Req
     if (!session.activeStore) {
       return next(forbiddenError('请先选择要操作的门店后再继续'));
     }
-    return runWithStoreContext(session.activeStore.id, () => next(), metaStore);
-  };
+    const overrides = await getRequestOverrides(metaStore, session.activeStore.id);
+    return runWithStoreContext(session.activeStore.id, () => next(), overrides);
+  });
 }
 
-export function createDbStoreContextMiddleware(metaStore: MetaStore): express.RequestHandler {
-  return (req, _res, next) => {
+export function createDbStoreContextMiddleware(metaStore: IdentityStore): express.RequestHandler {
+  return asyncHandler(async (req, _res, next) => {
     const session = (req as any).userSession as UserSessionInfo | undefined;
     if (!session) {
       return next(unauthorizedError('未登录或账户会话已过期，请先登录'));
@@ -128,7 +148,7 @@ export function createDbStoreContextMiddleware(metaStore: MetaStore): express.Re
           return next(forbiddenError('当前账户无权直接切换配置其他门店'));
         }
       }
-      const found = metaStore.getStoreById(requestedId);
+      const found = await metaStore.getStoreById(requestedId);
       if (!found) {
         return next(notFoundError('门店不存在'));
       }
@@ -137,7 +157,7 @@ export function createDbStoreContextMiddleware(metaStore: MetaStore): express.Re
       }
       targetStore = found;
     } else if (!targetStore && session.user.role === 'admin') {
-      targetStore = session.availableStores[0] || metaStore.listStores()[0] || null;
+      targetStore = session.availableStores[0] || (await metaStore.listStores())[0] || null;
     }
 
     if (!targetStore) {
@@ -151,8 +171,10 @@ export function createDbStoreContextMiddleware(metaStore: MetaStore): express.Re
       expiresAt: session.expiresAt,
     } satisfies StoreSessionInfo;
 
-    return runWithStoreContext(targetStore.id, () => next(), metaStore);
-  };
+    const overrides = await getRequestOverrides(metaStore, targetStore.id);
+    (req as any).dbOverrides = overrides.configs;
+    return runWithStoreContext(targetStore.id, () => next(), overrides);
+  });
 }
 
 export function createPermissionMiddleware(
@@ -226,9 +248,9 @@ function validateUsernameAndPassword(
   return { username, displayName, password };
 }
 
-function resolveValidatedStoreIds(metaStore: MetaStore, rawStoreIds: unknown): number[] {
+async function resolveValidatedStoreIds(metaStore: IdentityStore, rawStoreIds: unknown): Promise<number[]> {
   if (!Array.isArray(rawStoreIds)) return [];
-  const validStoreIds = new Set(metaStore.listStores().map((s) => s.id));
+  const validStoreIds = new Set((await metaStore.listStores()).map((s) => s.id));
   const result: number[] = [];
   for (const raw of rawStoreIds) {
     const id = Number(raw);
@@ -244,8 +266,10 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
     options.dbMode ||
     (process.env.IMS_DB_MODE === 'sqlite-seed' ? 'sqlite-seed' : 'mssql');
 
-  const metaStore = options.metaStore || getMetaStore();
-  setMssqlOverrideStore(metaStore);
+  const hostedMode = mode !== 'sqlite-seed' && isHostedSqlEnabled();
+  const sqliteMetaStore = hostedMode ? null : options.metaStore || getMetaStore();
+  const metaStore = options.identityStore || (hostedMode ? new SqlIdentityStore() : sqliteMetaStore!);
+  setMssqlOverrideStore(sqliteMetaStore);
   const sandbox =
     mode === 'sqlite-seed' ? options.sandbox || getSqliteSandbox() : undefined;
 
@@ -259,9 +283,10 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
     ? new SqliteSalesRepository(sandbox)
     : new MssqlSalesRepository();
 
-  const inventoryService = new InventoryService(inventoryRepo, metaStore);
+  const productMetadata = hostedMode ? new HostedProductMetadataStore() : sqliteMetaStore!;
+  const inventoryService = new InventoryService(inventoryRepo, productMetadata);
   const stocktakeService = new StocktakeService(stocktakeRepo);
-  const salesService = new SalesService(salesRepo, metaStore);
+  const salesService = new SalesService(salesRepo, productMetadata);
 
   const requireAuth = createUserAuthMiddleware(metaStore);
   const requireStoreSelected = createStoreSelectedMiddleware(metaStore);
@@ -278,12 +303,12 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
 
   // ===== Public Account Auth & Store Selection Routes =====
 
-  app.get('/api/auth/status', (req, res) => {
+  app.get('/api/auth/status', asyncHandler(async (req, res) => {
     const token = extractBearerToken(req);
-    const session = token ? metaStore.verifyUserSessionToken(token) : null;
+    const session = token ? await metaStore.verifyUserSessionToken(token) : null;
     sendSuccess(res, {
-      initialized: metaStore.countUsers() > 0,
-      hasStores: metaStore.countStores() > 0,
+      initialized: (await metaStore.countUsers()) > 0,
+      hasStores: (await metaStore.countStores()) > 0,
       authenticated: Boolean(session),
       user: session ? session.user : null,
       currentStore: session?.activeStore
@@ -301,12 +326,12 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
           }))
         : [],
     });
-  });
+  }));
 
   app.post(
     '/api/auth/bootstrap',
     asyncHandler(async (req, res) => {
-      if (metaStore.countUsers() > 0) {
+      if (hostedMode || (await metaStore.countUsers()) > 0) {
         throw forbiddenError('系统已初始化管理员账户，请直接登录');
       }
 
@@ -315,16 +340,16 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         requirePassword: true,
       });
 
-      const existingStores = metaStore.listStores();
+      const existingStores = await metaStore.listStores();
       let primaryStore = existingStores[0] || null;
       if (!primaryStore) {
         const { storeCode, storeName } = normalizeAndValidateStoreInput(req.body);
-        primaryStore = metaStore.createStore({ storeCode, storeName });
-        metaStore.migrateLegacyOverridesToStore(primaryStore.id);
+        primaryStore = await metaStore.createStore({ storeCode, storeName });
+        await metaStore.migrateLegacyOverridesToStore(primaryStore.id);
       }
 
-      const allStoreIds = metaStore.listStores().map((s) => s.id);
-      const adminUser = metaStore.createUser({
+      const allStoreIds = (await metaStore.listStores()).map((s) => s.id);
+      const adminUser = await metaStore.createUser({
         username: username!,
         displayName: displayName || username!,
         password: password!,
@@ -336,8 +361,8 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       });
 
       // Admin manages accounts, permissions, and per-store SQL settings without entering a store
-      const session = metaStore.createUserSession(adminUser.id, null);
-      const availableStores = filterAccessibleStores(adminUser, metaStore.listStores());
+      const session = await metaStore.createUserSession(adminUser.id, null);
+      const availableStores = filterAccessibleStores(adminUser, await metaStore.listStores());
 
       sendSuccess(
         res,
@@ -365,14 +390,14 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       if (!username || !password) {
         throw validationError('请输入登录账号和密码');
       }
-      const user = metaStore.authenticateUser(username, password);
+      const user = await metaStore.authenticateUser(username, password);
       if (!user) {
         throw unauthorizedError('账号或密码错误，或账号已被停用');
       }
 
       // After login, activeStore starts null so the user picks a store on the Store Selection screen
-      const session = metaStore.createUserSession(user.id, null);
-      const availableStores = filterAccessibleStores(user, metaStore.listStores());
+      const session = await metaStore.createUserSession(user.id, null);
+      const availableStores = filterAccessibleStores(user, await metaStore.listStores());
 
       sendSuccess(res, {
         token: session.token,
@@ -401,8 +426,8 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       }
 
       if (rawStoreId === null) {
-        metaStore.setSessionActiveStore(token, null);
-        const refreshed = metaStore.verifyUserSessionToken(token)!;
+        await metaStore.setSessionActiveStore(token, null);
+        const refreshed = (await metaStore.verifyUserSessionToken(token))!;
         return sendSuccess(res, {
           user: refreshed.user,
           currentStore: null,
@@ -418,7 +443,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       if (!Number.isInteger(storeId) || storeId <= 0) {
         throw validationError('无效的门店 ID');
       }
-      const store = metaStore.getStoreById(storeId);
+      const store = await metaStore.getStoreById(storeId);
       if (!store) {
         throw notFoundError('门店不存在');
       }
@@ -426,8 +451,8 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         throw forbiddenError('当前账户未被分配访问该门店的权限');
       }
 
-      metaStore.setSessionActiveStore(token, store.id);
-      const refreshed = metaStore.verifyUserSessionToken(token)!;
+      await metaStore.setSessionActiveStore(token, store.id);
+      const refreshed = (await metaStore.verifyUserSessionToken(token))!;
 
       sendSuccess(res, {
         user: refreshed.user,
@@ -445,13 +470,13 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
     })
   );
 
-  app.post('/api/auth/logout', (req, res) => {
+  app.post('/api/auth/logout', asyncHandler(async (req, res) => {
     const token = extractBearerToken(req);
     if (token) {
-      metaStore.revokeUserSessionToken(token);
+      await metaStore.revokeUserSessionToken(token);
     }
     sendSuccess(res, { loggedOut: true });
-  });
+  }));
 
   app.post(
     '/api/auth/change-password',
@@ -467,14 +492,14 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       if (!currentPassword) {
         throw validationError('请输入当前登录密码');
       }
-      if (!metaStore.verifyUserPassword(session.user.id, currentPassword)) {
+      if (!(await metaStore.verifyUserPassword(session.user.id, currentPassword))) {
         throw validationError('当前登录密码不正确');
       }
       if (newPassword.length < 4 || newPassword.length > 128) {
         throw validationError('新密码长度需为 4–128 位字符');
       }
 
-      metaStore.updateUser(session.user.id, {
+      await metaStore.updateUser(session.user.id, {
         password: newPassword,
         keepToken: currentToken,
       });
@@ -489,11 +514,9 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
     '/api/users',
     requireAuth,
     createPermissionMiddleware('user_mgmt'),
-    (_req, res) => {
-      sendSuccess(res, {
-        rows: metaStore.listUsers(),
-      });
-    }
+    asyncHandler(async (_req, res) => {
+      sendSuccess(res, { rows: await metaStore.listUsers() });
+    })
   );
 
   app.post(
@@ -506,17 +529,17 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         requirePassword: true,
       });
 
-      if (metaStore.getUserByUsername(username!)) {
+      if (await metaStore.getUserByUsername(username!)) {
         throw conflictError(`账号 ${username} 已存在`);
       }
 
       const role: UserRole = isValidUserRole(req.body?.role) ? req.body.role : 'staff';
       const permissions = normalizePermissions(req.body?.permissions, role);
       const allStores = Boolean(req.body?.allStores);
-      const assignedStoreIds = resolveValidatedStoreIds(metaStore, req.body?.assignedStoreIds);
+      const assignedStoreIds = await resolveValidatedStoreIds(metaStore, req.body?.assignedStoreIds);
       const isActive = req.body?.isActive !== undefined ? Boolean(req.body.isActive) : true;
 
-      const created = metaStore.createUser({
+      const created = await metaStore.createUser({
         username: username!,
         displayName: displayName || username!,
         password: password!,
@@ -541,7 +564,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       if (!Number.isInteger(id) || id <= 0) {
         throw validationError('无效的账号 ID');
       }
-      const existing = metaStore.getUserById(id);
+      const existing = await metaStore.getUserById(id);
       if (!existing) {
         throw notFoundError('账户不存在');
       }
@@ -567,7 +590,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         req.body?.allStores !== undefined ? Boolean(req.body.allStores) : existing.allStores;
       const nextAssignedStoreIds =
         req.body?.assignedStoreIds !== undefined
-          ? resolveValidatedStoreIds(metaStore, req.body.assignedStoreIds)
+          ? await resolveValidatedStoreIds(metaStore, req.body.assignedStoreIds)
           : existing.assignedStoreIds;
       const nextIsActive =
         req.body?.isActive !== undefined ? Boolean(req.body.isActive) : existing.isActive;
@@ -580,13 +603,13 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         nextIsActive && nextRole === 'admin' && nextPermissions.includes('user_mgmt');
 
       if (wasManagerAdmin && !remainsManagerAdmin) {
-        if (metaStore.countActiveAdminsWithUserMgmt(id) === 0) {
+        if ((await metaStore.countActiveAdminsWithUserMgmt(id)) === 0) {
           throw validationError('系统至少需要保留一名启用且拥有账户管理权限的管理员');
         }
       }
 
       const keepToken = id === session.user.id ? String((req as any)._authToken || '') : undefined;
-      const updated = metaStore.updateUser(id, {
+      const updated = await metaStore.updateUser(id, {
         displayName,
         password,
         role: nextRole,
@@ -614,7 +637,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       if (id === session.user.id) {
         throw validationError('不能删除当前正在登录的账户');
       }
-      const existing = metaStore.getUserById(id);
+      const existing = await metaStore.getUserById(id);
       if (!existing) {
         throw notFoundError('账户不存在');
       }
@@ -622,25 +645,25 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         existing.isActive &&
         existing.role === 'admin' &&
         existing.permissions.includes('user_mgmt');
-      if (isManagerAdmin && metaStore.countActiveAdminsWithUserMgmt(id) === 0) {
+      if (isManagerAdmin && (await metaStore.countActiveAdminsWithUserMgmt(id)) === 0) {
         throw validationError('不能删除系统最后一名管理员账户');
       }
 
-      metaStore.deleteUser(id);
+      await metaStore.deleteUser(id);
       sendSuccess(res, { deleted: true });
     })
   );
 
   // ===== Protected Multi-Store Management Routes =====
 
-  app.get('/api/stores', requireAuth, (req, res) => {
+  app.get('/api/stores', requireAuth, asyncHandler(async (req, res) => {
     const session = (req as any).userSession as UserSessionInfo;
     const canManageAll = hasPermission(session.user, 'user_mgmt');
-    const sourceStores = canManageAll ? metaStore.listStores() : session.availableStores;
+    const sourceStores = canManageAll ? await metaStore.listStores() : session.availableStores;
 
-    const rows = sourceStores.map((s) => {
-      const skladCfg = metaStore.getDbOverride('sklad', s.id);
-      const saleCfg = metaStore.getDbOverride('saledata', s.id);
+    const rows = await Promise.all(sourceStores.map(async (s) => {
+      const skladCfg = await metaStore.getDbOverride('sklad', s.id);
+      const saleCfg = await metaStore.getDbOverride('saledata', s.id);
       return {
         id: s.id,
         storeCode: s.storeCode,
@@ -651,12 +674,12 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         hasSkladConfig: Boolean(skladCfg?.server),
         hasSaleDataConfig: Boolean(saleCfg?.server),
       };
-    });
+    }));
     sendSuccess(res, {
       currentStoreId: session.activeStore?.id ?? null,
       rows,
     });
-  });
+  }));
 
   app.post(
     '/api/stores',
@@ -666,14 +689,14 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       const session = (req as any).userSession as UserSessionInfo;
       const { storeCode, storeName } = normalizeAndValidateStoreInput(req.body);
 
-      if (metaStore.getStoreByCode(storeCode)) {
+      if (await metaStore.getStoreByCode(storeCode)) {
         throw conflictError(`门店编号 ${storeCode} 已存在`);
       }
 
-      const created = metaStore.createStore({ storeCode, storeName });
+      const created = await metaStore.createStore({ storeCode, storeName });
       const sourceStoreId = Number(req.body?.copyFromStoreId || session.activeStore?.id || 0);
       if (req.body?.copyDbFromCurrent && Number.isInteger(sourceStoreId) && sourceStoreId > 0) {
-        metaStore.cloneStoreDbConfigs(sourceStoreId, created.id);
+        await metaStore.cloneStoreDbConfigs(sourceStoreId, created.id);
       }
 
       sendSuccess(
@@ -699,7 +722,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       if (!Number.isInteger(id) || id <= 0) {
         throw validationError('无效的门店 ID');
       }
-      const existing = metaStore.getStoreById(id);
+      const existing = await metaStore.getStoreById(id);
       if (!existing) {
         throw notFoundError('门店不存在');
       }
@@ -710,7 +733,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         throw validationError('门店名称不能为空且不超过 60 个字符');
       }
 
-      const updated = metaStore.updateStore(id, { storeName });
+      const updated = await metaStore.updateStore(id, { storeName });
       sendSuccess(res, updated);
     })
   );
@@ -728,10 +751,10 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       if (session.activeStore && id === session.activeStore.id) {
         throw validationError('不能删除当前正在操作的门店，请先切换到其他门店后再删除');
       }
-      if (metaStore.countStores() <= 1) {
+      if ((await metaStore.countStores()) <= 1) {
         throw validationError('至少需要保留一家门店');
       }
-      const deleted = metaStore.deleteStore(id);
+      const deleted = await metaStore.deleteStore(id);
       if (!deleted) {
         throw notFoundError('门店不存在');
       }
@@ -848,6 +871,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
         server: string;
         port: number;
         database_name: string;
+        inventory_table?: InventoryTable;
         username: string;
         password: string;
         encrypt: boolean;
@@ -906,6 +930,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
           server,
           port,
           database_name: database,
+          inventory_table: base.inventoryTable,
           username: user,
           password,
           encrypt,
@@ -918,12 +943,13 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
       }
 
       for (const item of toSave) {
-        metaStore.upsertDbOverride(
+        (req as any).dbOverrides[item.target] = await metaStore.upsertDbOverride(
           item.target,
           {
             server: item.server,
             port: item.port,
             database_name: item.database_name,
+            inventory_table: item.inventory_table,
             username: item.username,
             password: item.password,
             encrypt: item.encrypt,
@@ -968,7 +994,8 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
     resolveDbStoreContext,
     asyncHandler(async (req, res) => {
       const session = (req as any).storeSession as StoreSessionInfo;
-      metaStore.clearAllDbOverrides(session.storeId);
+      await metaStore.clearAllDbOverrides(session.storeId);
+      Object.assign((req as any).dbOverrides, { sklad: null, saledata: null });
       await closeAllMssqlPools(session.storeId);
 
       const dbStatus =
@@ -1008,6 +1035,13 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
   app.use('/api/stocktakes', requireAuth, createPermissionMiddleware('stocktake'), requireStoreSelected, createStocktakeRouter(stocktakeService));
   app.use('/api/sales', requireAuth, createPermissionMiddleware('sales'), requireStoreSelected, createSalesRouter(salesService));
 
+  const requireReceivingAuth = [requireAuth, createPermissionMiddleware('receiving'), requireStoreSelected];
+  if (hostedMode) app.use('/api/receiving', ...requireReceivingAuth, createReceivingRouter(), apiErrorMiddleware);
+  else app.use('/api/receiving', (_req, res) => res.status(503).json({
+    code: 50000,
+    message: '进货单 SQL 数据库尚未启用',
+  }));
+
   // Global error handler scoped to protected API paths
   app.use('/api/g1', apiErrorMiddleware);
   app.use('/api/stocktakes', apiErrorMiddleware);
@@ -1025,7 +1059,7 @@ export function mountImsRoutes(app: Express, options: MountImsOptions = {}) {
     sandbox,
     requireAuth,
     requireStoreSelected,
-    requireReceivingAuth: [requireAuth, createPermissionMiddleware('receiving'), requireStoreSelected] as express.RequestHandler[],
+    requireReceivingAuth,
   };
 }
 

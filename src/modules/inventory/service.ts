@@ -1,4 +1,4 @@
-import { MetaStore } from '../../core/db/metaStore';
+import type { ProductMetadataStore } from '../../core/db/productMetadataStore';
 import { notFoundError, validationError } from '../../core/http/envelope';
 import { InventoryRepository } from './repository';
 import {
@@ -21,11 +21,15 @@ import {
 } from './validators';
 
 export class InventoryService {
-  constructor(private repo: InventoryRepository, private metaStore: MetaStore) {}
+  constructor(private repo: InventoryRepository, private metaStore: ProductMetadataStore) {}
 
-  private enrichCategoryMeta(products: G1Product[]): G1Product[] {
-    const metaMap = this.metaStore.getAllProductMetaMap();
-    const catMap = new Map(this.metaStore.listCategories().map((c) => [c.code, c]));
+  private async enrichCategoryMeta(products: G1Product[]): Promise<G1Product[]> {
+    if (products.length === 0) return [];
+    const [metaMap, categories] = await Promise.all([
+      this.metaStore.getAllProductMetaMap(products.map((product) => product.Barcode)),
+      this.metaStore.listCategories(),
+    ]);
+    const catMap = new Map(categories.map((c) => [c.code, c]));
     return products.map((p) => {
       const meta = metaMap.get(p.Barcode.trim());
       const cat = meta?.category ? catMap.get(meta.category) : undefined;
@@ -34,6 +38,7 @@ export class InventoryService {
         category: meta?.category ?? null,
         category_name_sk: cat?.name_sk ?? null,
         category_name_zh: cat?.name_zh ?? null,
+        name_zh: meta?.name_zh || null,
       };
     });
   }
@@ -43,7 +48,7 @@ export class InventoryService {
     const { page, pageSize } = clampPagination(query.page, query.pageSize);
     const res = await this.repo.listProducts(query, page, pageSize);
     return {
-      rows: this.enrichCategoryMeta(res.rows),
+      rows: await this.enrichCategoryMeta(res.rows),
       total: res.total,
       page,
       pageSize,
@@ -57,7 +62,7 @@ export class InventoryService {
     if (!product) {
       throw notFoundError(`条码 ${bc} 的商品不存在`);
     }
-    const [enriched] = this.enrichCategoryMeta([product]);
+    const [enriched] = await this.enrichCategoryMeta([product]);
     return enriched;
   }
 
@@ -67,7 +72,7 @@ export class InventoryService {
     const created = await this.repo.createProduct(payload, changedBy);
     if (body.category !== undefined) {
       try {
-        this.metaStore.upsertProductMeta(
+        await this.metaStore.upsertProductMeta(
           created.Barcode,
           body.category ? String(body.category) : null,
           null,
@@ -77,7 +82,7 @@ export class InventoryService {
         console.warn('[Inventory] Optional category save failed on create:', err);
       }
     }
-    const [enriched] = this.enrichCategoryMeta([created]);
+    const [enriched] = await this.enrichCategoryMeta([created]);
     return enriched;
   }
 
@@ -86,14 +91,22 @@ export class InventoryService {
     const bc = normalizeBarcode(barcodeRaw);
     const patch = filterEditablePatch(body);
     const { after } = await this.repo.updateProduct(bc, patch, changedBy);
-    const [enriched] = this.enrichCategoryMeta([after]);
+    const [enriched] = await this.enrichCategoryMeta([after]);
     return enriched;
   }
 
   // Async metadata / category update per §4.5 item 4
-  updateProductCategory(barcodeRaw: string, category: string | null, changedBy: string) {
+  async updateProductCategory(barcodeRaw: string, category: string | null, changedBy: string, nameZh?: unknown) {
     const bc = normalizeBarcode(barcodeRaw);
-    return this.metaStore.upsertProductMeta(bc, category || null, null, changedBy);
+    const normalizedName = validateProductNameZh(nameZh);
+    if (!(await this.repo.getProductByBarcode(bc))) {
+      throw notFoundError(`条码 ${bc} 的商品不存在`);
+    }
+    return this.metaStore.upsertProductMeta(bc, category || null, normalizedName, changedBy);
+  }
+
+  listCategories() {
+    return this.metaStore.listCategories();
   }
 
   // R-INV-6
@@ -104,7 +117,7 @@ export class InventoryService {
       throw notFoundError(`条码 ${bc} 的商品不存在`);
     }
     try {
-      this.metaStore.deleteProductMeta(bc);
+      await this.metaStore.deleteProductMeta(bc);
     } catch {
       // non-blocking metadata cleanup
     }
@@ -120,7 +133,7 @@ export class InventoryService {
   // R-INV-8
   async listLowStock() {
     const res = await this.repo.listLowStock();
-    const enriched = this.enrichCategoryMeta(res.rows) as Array<G1Product & { Gap: number }>;
+    const enriched = (await this.enrichCategoryMeta(res.rows)) as Array<G1Product & { Gap: number }>;
     return {
       rows: enriched,
       total: res.total,
@@ -130,13 +143,13 @@ export class InventoryService {
   // Synchronized Inventory XLSX Export
   async exportProductsXlsx(query: ProductListQuery): Promise<Buffer> {
     const rawRows = await this.repo.getAllMatchingForExport(query);
-    const rows = this.enrichCategoryMeta(rawRows);
+    const rows = await this.enrichCategoryMeta(rawRows);
     return Buffer.from(buildInventoryExportWorkbookBytes(rows));
   }
 
   // Standard Inventory Import Template XLSX
-  getImportTemplateXlsx(): Buffer {
-    return Buffer.from(buildInventoryImportTemplateBytes());
+  async getImportTemplateXlsx(): Promise<Buffer> {
+    return Buffer.from(buildInventoryImportTemplateBytes(await this.metaStore.listCategories()));
   }
 
   // Batch Inventory Import (create_only | update_only | upsert) with strict 29-field whitelist
@@ -151,6 +164,9 @@ export class InventoryService {
     if (items.length > 500) {
       throw validationError('单次导入最多支持 500 行商品，请分批导入');
     }
+    const categories = items.some((item) => item?.category)
+      ? await this.metaStore.listCategories()
+      : [];
 
     let created = 0;
     let updated = 0;
@@ -168,7 +184,7 @@ export class InventoryService {
 
         const resolvedCat =
           raw.category !== undefined && raw.category !== null && String(raw.category).trim() !== ''
-            ? resolveCategoryCode(raw.category) ?? String(raw.category).trim()
+            ? resolveCategoryCode(raw.category, categories) ?? String(raw.category).trim()
             : undefined;
 
         if (existing) {
@@ -218,7 +234,7 @@ export class InventoryService {
             didUpdate = true;
           }
           if (resolvedCat !== undefined) {
-            this.metaStore.upsertProductMeta(bc, resolvedCat, null, changedBy);
+            await this.metaStore.upsertProductMeta(bc, resolvedCat, null, changedBy);
             didUpdate = true;
           }
 
@@ -246,7 +262,7 @@ export class InventoryService {
           });
           await this.repo.createProduct(payload, changedBy);
           if (resolvedCat !== undefined) {
-            this.metaStore.upsertProductMeta(bc, resolvedCat, null, changedBy);
+            await this.metaStore.upsertProductMeta(bc, resolvedCat, null, changedBy);
           }
           created++;
         }
@@ -261,4 +277,12 @@ export class InventoryService {
 
     return { created, updated, skipped, errors };
   }
+}
+
+function validateProductNameZh(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value.trim().length > 256) {
+    throw validationError('中文品名最多 256 个字符');
+  }
+  return value.trim();
 }

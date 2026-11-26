@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { CATEGORY_DICTIONARY } from '../sales/category-rules';
+import { CATEGORY_DICTIONARY, type CategoryDef } from '../sales/category-rules';
 import { G1Product, InventoryImportItemInput } from './types';
 import { calculateVatMetrics, getStockStatus } from './validators';
 
@@ -104,16 +104,17 @@ export function buildInventoryExportWorkbookBytes(products: G1Product[]): Uint8A
   return new Uint8Array(out);
 }
 
-export function buildInventoryImportTemplateBytes(): Uint8Array {
+export function buildInventoryImportTemplateBytes(categories: CategoryDef[] = CATEGORY_DICTIONARY): Uint8Array {
+  const sampleCategory = categories.find((category) => category.code === 'food_snack') ?? categories[0];
   const sampleRows = [
     {
       条码_Barcode: '8580000000001',
       商品名称_Nazov: 'Vzorový produkt / 示例商品（可修改或删除此行）',
       货号_Kod: 'SKU-001',
       供应商_Supplier: 'Dodávateľ s.r.o.',
-      品类编码_Category: 'food_snack',
-      品类名称_ZH: '食品零食',
-      品类名称_SK: 'Potraviny a pochutiny',
+      品类编码_Category: sampleCategory?.code ?? '',
+      品类名称_ZH: sampleCategory?.name_zh ?? '',
+      品类名称_SK: sampleCategory?.name_sk ?? '',
       可售库存_Surplus: 24,
       警戒线_WarningAt: 5,
       库存状态_Status: '有货 (in)',
@@ -168,7 +169,7 @@ export function buildInventoryImportTemplateBytes(): Uint8Array {
       是否必填: '只读参考列',
       导入行为说明: '自动计算或由盘点模块管理，导入已有商品时不会覆盖 WarningAt。',
     },
-    ...CATEGORY_DICTIONARY.map((cat) => ({
+    ...categories.map((cat) => ({
       字段列名: `品类编码: ${cat.code}`,
       是否必填: cat.name_zh,
       导入行为说明: cat.name_sk,
@@ -183,21 +184,13 @@ export function buildInventoryImportTemplateBytes(): Uint8Array {
   return new Uint8Array(out);
 }
 
-const categoryLookup = (() => {
-  const byKey = new Map<string, string>();
-  for (const c of CATEGORY_DICTIONARY) {
-    byKey.set(c.code.toLowerCase(), c.code);
-    byKey.set(c.name_zh.trim().toLowerCase(), c.code);
-    byKey.set(c.name_sk.trim().toLowerCase(), c.code);
-  }
-  return byKey;
-})();
-
-export function resolveCategoryCode(raw: unknown): string | undefined {
+export function resolveCategoryCode(raw: unknown, categories: CategoryDef[] = CATEGORY_DICTIONARY): string | undefined {
   if (raw === null || raw === undefined) return undefined;
   const text = String(raw).trim();
   if (!text) return undefined;
-  return categoryLookup.get(text.toLowerCase());
+  const key = text.toLowerCase();
+  return categories.filter((category) => [category.code, category.name_zh, category.name_sk]
+    .some((value) => value.trim().toLowerCase() === key)).at(-1)?.code;
 }
 
 function normalizeHeaderKey(key: string): string {
@@ -233,7 +226,7 @@ export interface ParsedWorkbookRow {
   error?: string;
 }
 
-export function parseInventoryWorkbook(data: ArrayBuffer | Uint8Array): {
+export function parseInventoryWorkbook(data: ArrayBuffer | Uint8Array, categories: CategoryDef[] = CATEGORY_DICTIONARY): {
   parsedRows: ParsedWorkbookRow[];
   validItems: InventoryImportItemInput[];
   errorCount: number;
@@ -327,9 +320,9 @@ export function parseInventoryWorkbook(data: ArrayBuffer | Uint8Array): {
     }
 
     const resolvedCat =
-      resolveCategoryCode(catCodeRaw) ??
-      resolveCategoryCode(catZhRaw) ??
-      resolveCategoryCode(catSkRaw);
+      resolveCategoryCode(catCodeRaw, categories) ??
+      resolveCategoryCode(catZhRaw, categories) ??
+      resolveCategoryCode(catSkRaw, categories);
 
     const item: InventoryImportItemInput = {
       rowNumber,

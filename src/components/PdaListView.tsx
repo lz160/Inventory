@@ -1,12 +1,14 @@
-import React from 'react';
-import { PurchaseItem, calculateItemStatus, checkPriceDiscrepancy } from '../utils/reconciliation';
+import React, { useState } from 'react';
+import { calculateItemStatus, checkPriceDiscrepancy } from '../utils/reconciliation';
+import type { ReceivingChanges, ReceivingLine } from '../modules/receiving/types';
 import { Check, Minus, Plus, CheckCheck, AlertTriangle, ExternalLink, Package, FileText } from 'lucide-react';
 
 interface PdaListViewProps {
-  items: PurchaseItem[];
+  items: ReceivingLine[];
   priceBasis: 'discountPrice' | 'unitPrice' | 'unitPrice2';
-  onUpdateItem: (id: string, updates: Partial<PurchaseItem>) => void;
-  onSelectItemForDetail: (item: PurchaseItem) => void;
+  onUpdateItem: (item: ReceivingLine, updates: ReceivingChanges) => Promise<boolean>;
+  onAdjustQuantity: (id: string, delta: number) => void;
+  onSelectItemForDetail: (item: ReceivingLine) => void;
   highlightedItemId: string | null;
 }
 
@@ -14,16 +16,12 @@ export const PdaListView: React.FC<PdaListViewProps> = ({
   items,
   priceBasis,
   onUpdateItem,
+  onAdjustQuantity,
   onSelectItemForDetail,
   highlightedItemId,
 }) => {
-  const handleStepQty = (item: PurchaseItem, delta: number) => {
-    const next = Math.max(0, item.receivedQty + delta);
-    onUpdateItem(item.id, { receivedQty: next });
-  };
-
-  const handleMarkAll = (item: PurchaseItem) => {
-    onUpdateItem(item.id, { receivedQty: item.expectedQty });
+  const handleMarkAll = (item: ReceivingLine) => {
+    void onUpdateItem(item, { receivedQty: item.expectedQty });
   };
 
   if (items.length === 0) {
@@ -146,7 +144,7 @@ export const PdaListView: React.FC<PdaListViewProps> = ({
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => handleStepQty(item, -1)}
+                  onClick={() => onAdjustQuantity(item.id, -1)}
                   disabled={item.receivedQty <= 0}
                   className="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-white text-slate-800 font-bold active:scale-95 shadow-2xs"
                   aria-label={`实收减1 ${item.name}`}
@@ -156,22 +154,12 @@ export const PdaListView: React.FC<PdaListViewProps> = ({
 
                 <div className="flex flex-col items-center justify-center px-3 py-1 bg-white border border-slate-300 rounded-lg min-w-[70px]">
                   <span className="text-[10px] text-slate-400 leading-tight">实收件数</span>
-                  <input
-                    type="number"
-                    min="0"
-                    value={item.receivedQty}
-                    onChange={(e) => {
-                      const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                      onUpdateItem(item.id, { receivedQty: val });
-                    }}
-                    className="w-12 text-center text-base font-bold font-mono-numbers text-slate-900 bg-transparent focus:outline-none"
-                    aria-label={`实收数量 ${item.name}`}
-                  />
+                  <ReceivedQuantityInput item={item} onUpdateItem={onUpdateItem} />
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => handleStepQty(item, 1)}
+                  onClick={() => onAdjustQuantity(item.id, 1)}
                   className="w-10 h-10 flex items-center justify-center rounded-lg border border-indigo-300 bg-indigo-600 text-white font-bold hover:bg-indigo-700 active:scale-95 shadow-2xs"
                   aria-label={`实收加1 ${item.name}`}
                 >
@@ -180,7 +168,7 @@ export const PdaListView: React.FC<PdaListViewProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => handleStepQty(item, 5)}
+                  onClick={() => onAdjustQuantity(item.id, 5)}
                   className="h-10 px-2.5 flex items-center justify-center rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-mono-numbers text-xs font-semibold active:scale-95"
                   title="加5件"
                 >
@@ -212,3 +200,33 @@ export const PdaListView: React.FC<PdaListViewProps> = ({
     </div>
   );
 };
+
+function ReceivedQuantityInput({
+  item, onUpdateItem,
+}: {
+  item: ReceivingLine;
+  onUpdateItem: PdaListViewProps['onUpdateItem'];
+}) {
+  const [draft, setDraft] = useState<{ value: string; item: ReceivingLine } | null>(null);
+  return (
+    <input
+      type="number"
+      min="0"
+      step="any"
+      value={draft?.value ?? item.receivedQty}
+      onFocus={() => setDraft({ value: String(item.receivedQty), item })}
+      onChange={(e) => setDraft({ value: e.target.value, item: draft?.item ?? item })}
+      onBlur={() => {
+        if (!draft) return;
+        const quantity = Math.max(0, Number(draft.value));
+        if (Number.isFinite(quantity) && quantity !== draft.item.receivedQty) {
+          void onUpdateItem(draft.item, { receivedQty: quantity });
+        }
+        setDraft(null);
+      }}
+      onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+      className="w-12 text-center text-base font-bold font-mono-numbers text-slate-900 bg-transparent focus:outline-none"
+      aria-label={`实收数量 ${item.name}`}
+    />
+  );
+}

@@ -54,7 +54,7 @@ export class StocktakeService {
     const input = validateStocktakeLineInput(body);
     const product = await this.repo.lookupG1Product(input.barcode);
     if (!product) {
-      throw notFoundError(`条码 ${input.barcode} 的商品不存在于本店 g1`);
+      throw notFoundError(`门店库存主表中找不到条码 ${input.barcode}`);
     }
 
     const systemQty = Number(product.Surplus ?? 0) || 0;

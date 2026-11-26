@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, AlertTriangle, Check, DollarSign, Package, CheckCheck, Plus, Minus } from 'lucide-react';
-import { PurchaseItem, checkPriceDiscrepancy, calculateItemStatus } from '../utils/reconciliation';
+import { checkPriceDiscrepancy, calculateItemStatus } from '../utils/reconciliation';
+import type { ReceivingChanges, ReceivingLine } from '../modules/receiving/types';
 
 interface ItemDetailDrawerProps {
-  item: PurchaseItem | null;
+  item: ReceivingLine;
   onClose: () => void;
-  onSave: (id: string, updates: Partial<PurchaseItem>) => void;
+  onSave: (item: ReceivingLine, updates: ReceivingChanges) => Promise<boolean>;
   priceBasis: 'discountPrice' | 'unitPrice' | 'unitPrice2';
 }
 
@@ -15,9 +16,8 @@ export const ItemDetailDrawer: React.FC<ItemDetailDrawerProps> = ({
   onSave,
   priceBasis,
 }) => {
-  if (!item) return null;
-
-  const [formData, setFormData] = useState<PurchaseItem>(item);
+  const [formData, setFormData] = useState(item);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setFormData(item);
@@ -26,22 +26,36 @@ export const ItemDetailDrawer: React.FC<ItemDetailDrawerProps> = ({
   // Support ESC to close
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (!saving && e.key === 'Escape') {
         onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [onClose, saving]);
 
-  const handleChange = (field: keyof PurchaseItem, val: any) => {
+  const handleChange = <Key extends keyof ReceivingChanges>(field: Key, val: ReceivingChanges[Key]) => {
     setFormData((prev) => ({ ...prev, [field]: val }));
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSave(item.id, formData);
-    onClose();
+    if (saving) return;
+    const changes: ReceivingChanges = {};
+    if (formData.receivedQty !== item.receivedQty) changes.receivedQty = formData.receivedQty;
+    if (formData.damagedQty !== item.damagedQty) changes.damagedQty = formData.damagedQty;
+    if (formData.actualBilledPrice !== item.actualBilledPrice) changes.actualBilledPrice = formData.actualBilledPrice;
+    if (formData.notes !== item.notes) changes.notes = formData.notes;
+    if (!Object.keys(changes).length) {
+      onClose();
+      return;
+    }
+    setSaving(true);
+    try {
+      if (await onSave(item, changes)) onClose();
+    } finally {
+      setSaving(false);
+    }
   };
 
   const priceCheck = checkPriceDiscrepancy(formData, priceBasis);
@@ -84,6 +98,7 @@ export const ItemDetailDrawer: React.FC<ItemDetailDrawerProps> = ({
           <button
             type="button"
             onClick={onClose}
+              disabled={saving}
             className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-200 shrink-0"
             aria-label="关闭详情弹窗"
           >
@@ -257,12 +272,14 @@ export const ItemDetailDrawer: React.FC<ItemDetailDrawerProps> = ({
             <button
               type="button"
               onClick={onClose}
+              disabled={saving}
               className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100"
             >
               关闭 (ESC)
             </button>
             <button
               type="submit"
+              disabled={saving}
               form="item-detail-form"
               className="px-4 py-1.5 text-xs font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 inline-flex items-center gap-1.5 shadow-xs active:scale-95"
             >

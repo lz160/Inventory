@@ -20,12 +20,14 @@ export interface ProductMetaRow {
 }
 
 export type DbOverrideTarget = 'sklad' | 'saledata';
+export type InventoryTable = 'g1' | 'sklad1';
 
 export interface DbOverrideRow {
   target: DbOverrideTarget;
   server: string;
   port: number;
   database_name: string;
+  inventory_table?: InventoryTable;
   username: string;
   password: string;
   encrypt: boolean;
@@ -905,6 +907,7 @@ export class MetaStore {
       server: string;
       port: number;
       database_name: string;
+      inventory_table?: InventoryTable;
       username: string;
       password: string;
       encrypt: boolean;

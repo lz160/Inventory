@@ -1,7 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import sql from 'mssql';
 import { serverError } from '../http/envelope';
-import type { DbOverrideRow, DbOverrideTarget } from './metaStore';
+import { isHostedSqlEnabled } from './hostedSql';
+import type { DbOverrideRow, DbOverrideTarget, InventoryTable } from './metaStore';
 
 export type DbTarget = DbOverrideTarget;
 
@@ -42,6 +43,7 @@ export interface MssqlPoolConfig {
   user: string;
   password: string;
   database: string;
+  inventoryTable?: InventoryTable;
   max: number;
   requestTimeoutMs: number;
   encrypt: boolean;
@@ -142,7 +144,10 @@ export function getEffectiveMssqlConfig(
   const envCfg = getMssqlConfigFromEnv(target);
   const override = getActiveOverrideStore()?.getDbOverride(target, storeId) || null;
   if (!override) {
-    return { cfg: envCfg, source: 'env' };
+    const cfg = isHostedSqlEnabled() && storeId !== null
+      ? { ...envCfg, server: '', user: '', password: '' }
+      : envCfg;
+    return { cfg, source: 'env' };
   }
 
   return {
@@ -152,6 +157,7 @@ export function getEffectiveMssqlConfig(
       user: override.username.trim(),
       password: override.password,
       database: override.database_name.trim() || (target === 'sklad' ? 'SKLAD' : 'SaleData'),
+      inventoryTable: target === 'sklad' ? override.inventory_table : undefined,
       max: envCfg.max,
       requestTimeoutMs: envCfg.requestTimeoutMs,
       encrypt: override.encrypt,
@@ -160,6 +166,11 @@ export function getEffectiveMssqlConfig(
     source: 'override',
     updatedAt: override.updated_at,
   };
+}
+
+export function getInventoryTable(): '[dbo].[g1]' | '[dbo].[sklad1]' {
+  const table = getEffectiveMssqlConfig('sklad').cfg.inventoryTable;
+  return table === 'sklad1' ? '[dbo].[sklad1]' : '[dbo].[g1]';
 }
 
 export function getSanitizedDbConfig(target: DbTarget): SanitizedDbConfig {

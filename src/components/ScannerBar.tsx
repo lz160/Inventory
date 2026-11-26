@@ -83,7 +83,6 @@ export const ScannerBar: React.FC<ScannerBarProps> = ({
     );
     if (exactBarcode) {
       onScanMatch(exactBarcode, stepQty);
-      onOpenItemModal(exactBarcode);
       setMatchError(null);
       setQuery('');
       return;
@@ -94,7 +93,6 @@ export const ScannerBar: React.FC<ScannerBarProps> = ({
     );
     if (exactItemNo) {
       onScanMatch(exactItemNo, stepQty);
-      onOpenItemModal(exactItemNo);
       setMatchError(null);
       setQuery('');
       return;
@@ -107,7 +105,6 @@ export const ScannerBar: React.FC<ScannerBarProps> = ({
       // Single match: directly open product info window!
       const target = matches[0];
       onScanMatch(target, stepQty);
-      onOpenItemModal(target);
       setMatchError(null);
       setQuery('');
     } else if (matches.length > 1) {
@@ -124,7 +121,6 @@ export const ScannerBar: React.FC<ScannerBarProps> = ({
     setIsDropdownOpen(false);
     setQuery('');
     onScanMatch(item, stepQty);
-    onOpenItemModal(item);
   };
 
   return (

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily Receiving Workbench encrypted SQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Europe/Bratislava
+Persistent=true
+
+[Install]
+WantedBy=timers.target

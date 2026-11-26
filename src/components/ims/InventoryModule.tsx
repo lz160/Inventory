@@ -23,7 +23,7 @@ import { useIms, isConflict40901 } from '../../context/ImsContext';
 import { downloadImsXlsx, formatEur, formatQty } from '../../utils/imsApi';
 import { getStockStatus, calculateVatMetrics } from '../../modules/inventory/validators';
 import { G1Product, LowStockRow, StockStatus } from '../../modules/inventory/types';
-import { CATEGORY_DICTIONARY } from '../../modules/sales/category-rules';
+import type { CategoryDef } from '../../modules/sales/category-rules';
 import { InventoryImportModal } from './InventoryImportModal';
 import { DbConnectionNotice } from './DbConnectionNotice';
 
@@ -38,7 +38,7 @@ interface InlineDraft {
 }
 
 export const InventoryModule: React.FC = () => {
-  const { lang, t, apiCall, showToast, dbMode, dbContextReady, dbStatus } = useIms();
+  const { lang, t, apiCall, showToast, dbMode, dbContextReady, dbStatus, currentStore } = useIms();
   const skladBlocked = dbContextReady && dbMode === 'mssql' && !dbStatus.sklad.ok;
   const suppliersLoadedRef = useRef(false);
 
@@ -60,6 +60,7 @@ export const InventoryModule: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [lowStockRows, setLowStockRows] = useState<LowStockRow[]>([]);
   const [suppliers, setSuppliers] = useState<string[]>([]);
+  const [categories, setCategories] = useState<CategoryDef[]>([]);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -78,6 +79,7 @@ export const InventoryModule: React.FC = () => {
   const [editingProduct, setEditingProduct] = useState<G1Product | null>(null);
   const [editForm, setEditForm] = useState<{
     Nazov: string;
+    name_zh: string;
     Kod: string;
     Surplus: string;
     Cena: string;
@@ -130,6 +132,17 @@ export const InventoryModule: React.FC = () => {
       // non-fatal
     }
   }, [apiCall]);
+
+  useEffect(() => {
+    if (!currentStore) return;
+    let disposed = false;
+    setCategories([]);
+    apiCall<CategoryDef[]>('/api/g1/categories').then(
+      (list) => { if (!disposed) setCategories(list); },
+      (error) => { if (!disposed) showToast(error.message, 'error'); },
+    );
+    return () => { disposed = true; };
+  }, [apiCall, currentStore?.id, showToast]);
 
   const loadProducts = useCallback(async () => {
     setLoading(true);
@@ -256,21 +269,17 @@ export const InventoryModule: React.FC = () => {
 
       let nextRow = updated;
       if ((product.category || '') !== inlineDraft.category) {
-        try {
-          await apiCall(`/api/g1/products/${encodeURIComponent(product.Barcode)}/category`, {
-            method: 'PATCH',
-            body: JSON.stringify({ category: inlineDraft.category || null }),
-          });
-          const catObj = CATEGORY_DICTIONARY.find((c) => c.code === inlineDraft.category);
-          nextRow = {
-            ...updated,
-            category: inlineDraft.category || null,
-            category_name_zh: catObj?.name_zh || null,
-            category_name_sk: catObj?.name_sk || null,
-          };
-        } catch {
-          // non-blocking per §4.5 item 4
-        }
+        await apiCall(`/api/g1/products/${encodeURIComponent(product.Barcode)}/category`, {
+          method: 'PATCH',
+          body: JSON.stringify({ category: inlineDraft.category || null }),
+        });
+        const catObj = categories.find((c) => c.code === inlineDraft.category);
+        nextRow = {
+          ...updated,
+          category: inlineDraft.category || null,
+          category_name_zh: catObj?.name_zh || null,
+          category_name_sk: catObj?.name_sk || null,
+        };
       }
 
       setRows((prev) => prev.map((r) => (r.Barcode === product.Barcode ? nextRow : r)));
@@ -301,6 +310,7 @@ export const InventoryModule: React.FC = () => {
     setEditingProduct(product);
     setEditForm({
       Nazov: product.Nazov || '',
+      name_zh: product.name_zh || '',
       Kod: product.Kod || '',
       Surplus: String(product.Surplus ?? 0),
       Cena: String(product.Cena ?? 0),
@@ -331,11 +341,15 @@ export const InventoryModule: React.FC = () => {
         }),
       });
 
-      if ((editingProduct.category || '') !== editForm.category) {
-        apiCall(`/api/g1/products/${encodeURIComponent(editingProduct.Barcode)}/category`, {
+      const nameChanged = (editingProduct.name_zh || '') !== editForm.name_zh;
+      if ((editingProduct.category || '') !== editForm.category || nameChanged) {
+        await apiCall(`/api/g1/products/${encodeURIComponent(editingProduct.Barcode)}/category`, {
           method: 'PATCH',
-          body: JSON.stringify({ category: editForm.category || null }),
-        }).catch(() => {});
+          body: JSON.stringify({
+            category: editForm.category || null,
+            ...(nameChanged ? { name_zh: editForm.name_zh } : {}),
+          }),
+        });
       }
 
       showToast(lang === 'zh' ? '商品已保存' : 'Produkt uložený', 'success');
@@ -894,7 +908,7 @@ export const InventoryModule: React.FC = () => {
                               className="font-medium text-slate-900 truncate block max-w-full text-left hover:text-indigo-700"
                               title={p.Nazov}
                             >
-                              {p.Nazov}
+                              {(lang === 'zh' && p.name_zh) || p.Nazov}
                             </button>
                           </td>
 
@@ -1017,7 +1031,7 @@ export const InventoryModule: React.FC = () => {
                                   className="w-full px-2 py-1 text-xs border border-indigo-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                 >
                                   <option value="">{lang === 'zh' ? '未归类' : 'Nezaradené'}</option>
-                                  {CATEGORY_DICTIONARY.map((c) => (
+                                  {categories.map((c) => (
                                     <option key={c.code} value={c.code}>
                                       {lang === 'sk' ? `${c.name_sk} / ${c.name_zh}` : `${c.name_zh} / ${c.name_sk}`}
                                     </option>
@@ -1145,7 +1159,7 @@ export const InventoryModule: React.FC = () => {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-semibold text-slate-900 truncate">
-                              {p.Nazov}
+                              {(lang === 'zh' && p.name_zh) || p.Nazov}
                             </span>
                           </div>
                           <div className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
@@ -1233,7 +1247,7 @@ export const InventoryModule: React.FC = () => {
                               className="w-full px-2.5 py-1.5 rounded-md border border-indigo-300 bg-white text-xs"
                             >
                               <option value="">{lang === 'zh' ? '未归类' : 'Nezaradené'}</option>
-                              {CATEGORY_DICTIONARY.map((c) => (
+                              {categories.map((c) => (
                                 <option key={c.code} value={c.code}>
                                   {c.name_zh} / {c.name_sk}
                                 </option>
@@ -1480,6 +1494,16 @@ export const InventoryModule: React.FC = () => {
                     className="w-full px-3 py-2 rounded-lg border border-slate-300"
                   />
                 </div>
+                <label className="sm:col-span-2 block font-semibold text-slate-700">
+                  {lang === 'zh' ? '中文品名' : 'Čínsky názov produktu'}
+                  <input
+                    type="text"
+                    maxLength={256}
+                    value={editForm.name_zh}
+                    onChange={(e) => setEditForm({ ...editForm, name_zh: e.target.value })}
+                    className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-300 font-normal"
+                  />
+                </label>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Surplus</label>
                   <input
@@ -1546,7 +1570,7 @@ export const InventoryModule: React.FC = () => {
                     className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white"
                   >
                     <option value="">{lang === 'zh' ? '未归类' : 'Nezaradené'}</option>
-                    {CATEGORY_DICTIONARY.map((c) => (
+                    {categories.map((c) => (
                       <option key={c.code} value={c.code}>
                         {c.name_zh} / {c.name_sk}
                       </option>

@@ -10,12 +10,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 app.use(express.json({ limit: '10mb' }));
 
 import { mountImsRoutes } from './src/imsApp';
 import { closeAllMssqlPools } from './src/core/db/pool';
+import { closeHostedPools, isHostedSqlEnabled } from './src/core/db/hostedSql';
+import { SqlIdentityStore } from './src/core/db/sqlIdentityStore';
 import { apiErrorMiddleware } from './src/core/http/envelope';
 
 const { requireReceivingAuth } = mountImsRoutes(app);
@@ -103,6 +105,7 @@ const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 // Production or Vite development middleware setup
 async function startServer() {
+  if (isHostedSqlEnabled()) await new SqlIdentityStore().assertReady();
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
@@ -119,16 +122,21 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, () => {
+  const server = app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     console.log(`Server listening on port ${PORT} (isProd=${isProd})`);
   });
 
   const shutdown = async () => {
-    await closeAllMssqlPools();
-    server.close(() => process.exit(0));
+    server.close(async () => {
+      await Promise.all([closeAllMssqlPools(), closeHostedPools()]);
+      process.exit(0);
+    });
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
-startServer();
+startServer().catch((error: Error) => {
+  console.error('Workbench startup failed:', error.message);
+  process.exit(1);
+});

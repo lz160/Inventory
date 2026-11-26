@@ -9,7 +9,7 @@ import {
 import { useIms } from '../../context/ImsContext';
 import { downloadImsXlsx, formatEur, formatQty } from '../../utils/imsApi';
 import { calculateVatMetrics } from '../../modules/inventory/validators';
-import { CATEGORY_DICTIONARY } from '../../modules/sales/category-rules';
+import type { CategoryDef } from '../../modules/sales/category-rules';
 import { DbConnectionNotice } from './DbConnectionNotice';
 import {
   ByCategoryResult,
@@ -60,6 +60,7 @@ export const SalesAnalyticsModule: React.FC = () => {
 
   // Auto-categorize drawer state (§5.4 #8)
   const [isAutoCatOpen, setIsAutoCatOpen] = useState(false);
+  const [categories, setCategories] = useState<CategoryDef[]>([]);
   const [uncatData, setUncatData] = useState<{
     rows: UncatRow[];
     total: number;
@@ -135,13 +136,17 @@ export const SalesAnalyticsModule: React.FC = () => {
     try {
       const p = buildFilterQuery();
       p.set('limit', '200');
-      const data = await apiCall<{
-        rows: UncatRow[];
-        total: number;
-        withSuggestion: number;
-        suggestTotal: number;
-      }>(`/api/sales/uncategorized?${p.toString()}`);
+      const [data, categoryList] = await Promise.all([
+        apiCall<{
+          rows: UncatRow[];
+          total: number;
+          withSuggestion: number;
+          suggestTotal: number;
+        }>(`/api/sales/uncategorized?${p.toString()}`),
+        apiCall<CategoryDef[]>('/api/sales/categories'),
+      ]);
       setUncatData(data);
+      setCategories(categoryList);
 
       // §5.4 #8: Default-select rows that have an automatic suggestion
       const initialChecked = new Set<string>();
@@ -730,7 +735,7 @@ export const SalesAnalyticsModule: React.FC = () => {
                               className="w-full px-2 py-1 border border-slate-300 rounded text-xs bg-white"
                             >
                               <option value="">{lang === 'zh' ? '无匹配建议' : 'Bez návrhu'}</option>
-                              {CATEGORY_DICTIONARY.map((cat) => (
+                              {categories.map((cat) => (
                                 <option key={cat.code} value={cat.code}>
                                   {cat.name_zh} / {cat.name_sk}
                                 </option>

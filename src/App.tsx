@@ -8,7 +8,6 @@ import {
   checkPriceDiscrepancy,
   exportToPosImportXlsx,
   exportToAuditResultXlsx,
-  getSamplePurchaseOrders,
   isOrderCompleted,
 } from './utils/reconciliation';
 import { Sidebar, AppActiveView, AppWorkspaceTab } from './components/Sidebar';
@@ -33,52 +32,18 @@ import { StoreSelectScreen } from './components/ims/StoreSelectScreen';
 import { StoreSwitchModal } from './components/ims/StoreSwitchModal';
 import { getFirstPermittedWorkspace, isWorkspacePermitted } from './core/auth/permissions';
 
-const LEGACY_STORAGE_ORDERS_KEY = 'purchase_reconciliation_v2_orders';
+import { useReceivingOrders } from './modules/receiving/useReceivingOrders';
+import type { ReceivingChanges, ReceivingLine, ReceivingMode } from './modules/receiving/types';
+
 type WorkspaceTab = AppWorkspaceTab;
 
-function getStoreOrdersKey(storeCode: string): string {
-  return `${LEGACY_STORAGE_ORDERS_KEY}_${storeCode}`;
-}
-
-function loadStoreOrders(store: StoreSummary): PurchaseOrder[] {
-  const storeKey = getStoreOrdersKey(store.storeCode);
-  try {
-    const saved = localStorage.getItem(storeKey);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed;
-    }
-    // Migrate legacy single-store orders into first store automatically
-    if (store.id === 1) {
-      const legacy = localStorage.getItem(LEGACY_STORAGE_ORDERS_KEY);
-      if (legacy) {
-        const parsed = JSON.parse(legacy);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    }
-  } catch {
-    // fallback to sample
-  }
-  return getSamplePurchaseOrders();
-}
-
-function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary | null }) {
-  const { lang, toggleLang, t, user, hasPerm, hasAnyPerm, registerSettingsNavigator } = useIms();
+function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }) {
+  const { lang, toggleLang, t, user, hasPerm, registerSettingsNavigator, showToast } = useIms();
   const firstPermittedWorkspace = getFirstPermittedWorkspace(user);
-  const [workspace, setWorkspace] = useState<WorkspaceTab>(() => getFirstPermittedWorkspace(user) || 'receiving');
+  const [workspace, setWorkspace] = useState<WorkspaceTab>(() => firstPermittedWorkspace || 'receiving');
   const [isSwitchModalOpen, setIsSwitchModalOpen] = useState(false);
-
-  // Per-store purchase orders state
-  const [orders, setOrders] = useState<PurchaseOrder[]>(() =>
-    currentStore ? loadStoreOrders(currentStore) : []
-  );
-
-  // Reload orders cleanly whenever active store changes
-  useEffect(() => {
-    setOrders(currentStore ? loadStoreOrders(currentStore) : []);
-    setSelectedOrderId(null);
-    setSelectedItemForDetail(null);
-  }, [currentStore]);
+  const { orders, loadState, refresh, saveImport, removeOrder, editLine, adjustLine } =
+    useReceivingOrders(currentStore.id, workspace === 'receiving' && hasPerm('receiving'));
 
   // Keep workspace within permitted bounds when permissions update
   useEffect(() => {
@@ -111,18 +76,10 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
     timestamp: number;
   } | null>(null);
 
-  const [selectedItemForDetail, setSelectedItemForDetail] = useState<PurchaseItem | null>(null);
+  const [selectedItemForDetail, setSelectedItemForDetail] = useState<ReceivingLine | null>(null);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
-  // Sync state with store-scoped localStorage
-  useEffect(() => {
-    if (!currentStore) return;
-    try {
-      localStorage.setItem(getStoreOrdersKey(currentStore.storeCode), JSON.stringify(orders));
-    } catch {}
-  }, [orders, currentStore]);
-
-  const allOrdersItems: PurchaseItem[] = useMemo(() => {
+  const allOrdersItems: ReceivingLine[] = useMemo(() => {
     return orders.flatMap((order) =>
       order.items.map((item) => ({
         ...item,
@@ -137,7 +94,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
     return orders.find((o) => o.id === selectedOrderId) || orders[0] || null;
   }, [orders, selectedOrderId]);
 
-  const currentOrderItems: PurchaseItem[] = useMemo(() => {
+  const currentOrderItems: ReceivingLine[] = useMemo(() => {
     if (!selectedOrder) return [];
     return selectedOrder.items.map((item) => ({
       ...item,
@@ -181,61 +138,48 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
     setActiveView('items');
   };
 
-  const handleUpdateItem = (id: string, updates: Partial<PurchaseItem>) => {
-    setOrders((prevOrders) =>
-      prevOrders.map((order) => {
-        const itemExists = order.items.some((it) => it.id === id);
-        if (!itemExists) return order;
-
-        const updatedItems = order.items.map((item) => {
-          if (item.id !== id) return item;
-          return { ...item, ...updates };
-        });
-
-        const wasDone = isOrderCompleted(order);
-        const nextOrder: PurchaseOrder = {
-          ...order,
-          items: updatedItems,
-        };
-        const isNowDone = isOrderCompleted(nextOrder);
-
-        if (!wasDone && isNowDone) {
-          nextOrder.completedAt = new Date().toLocaleString();
-        } else if (wasDone && !isNowDone) {
-          nextOrder.completedAt = undefined;
-        }
-
-        return nextOrder;
-      })
-    );
-
-    setSelectedItemForDetail((current) => {
-      if (current && current.id === id) {
-        return { ...current, ...updates };
-      }
-      return current;
-    });
+  const handleUpdateItem = async (item: ReceivingLine, updates: ReceivingChanges) => {
+    try {
+      await editLine(item.id, updates, item.version);
+      return true;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '验货明细保存失败', 'error');
+      return false;
+    }
   };
 
-  const handleDeleteOrder = (orderId: string) => {
-    if (confirm('确定要移除此进货对货单及其包含的全部商品吗？')) {
-      setOrders((prev) => prev.filter((o) => o.id !== orderId));
+  const handleDeleteOrder = async (orderId: string) => {
+    const order = orders.find((entry) => entry.id === orderId);
+    if (!order || !confirm('确定要移除此进货对货单及其包含的全部商品吗？')) return;
+    try {
+      await removeOrder(order);
       if (selectedOrderId === orderId) {
         setSelectedOrderId(null);
         setActiveView('orders');
       }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '进货单删除失败', 'error');
     }
   };
 
-  const handleScanMatch = (matchedItem: PurchaseItem, stepQty: number) => {
-    const newQty = matchedItem.receivedQty + stepQty;
-    const now = new Date().toLocaleTimeString();
+  const handleAdjustQuantity = async (itemId: string, delta: number) => {
+    try {
+      await adjustLine(itemId, delta, false);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '实收数量保存失败', 'error');
+    }
+  };
 
-    handleUpdateItem(matchedItem.id, {
-      receivedQty: newQty,
-      lastScannedAt: now,
-    });
-
+  const handleScanMatch = async (matchedItem: PurchaseItem, stepQty: number) => {
+    let updatedItem: ReceivingLine;
+    try {
+      updatedItem = await adjustLine(matchedItem.id, stepQty, true);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '扫码保存失败', 'error');
+      return;
+    }
+    setSelectedItemForDetail({ ...updatedItem, orderTitle: matchedItem.orderTitle });
+    const newQty = updatedItem.receivedQty;
     const isDone = newQty === matchedItem.expectedQty;
     const isEx = newQty > matchedItem.expectedQty;
     const message = isDone
@@ -244,7 +188,6 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
       ? `已超收多送 (+${stepQty}, 现${newQty}/${matchedItem.expectedQty})`
       : `已核验录入 (+${stepQty}, 尚欠${matchedItem.expectedQty - newQty}件)`;
 
-    const updatedItem = { ...matchedItem, receivedQty: newQty };
     setLastScannedItem({
       item: updatedItem,
       message,
@@ -304,72 +247,19 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
     URL.revokeObjectURL(url);
   };
 
-  const handleImportItems = (
-    newItems: PurchaseItem[],
-    newBatchTitle: string,
-    mode: 'new_order' | 'replace' | 'append'
-  ) => {
-    const newOrderId = `order-${Date.now()}`;
-    const mappedItems: PurchaseItem[] = newItems.map((it) => ({
-      ...it,
-      orderId: newOrderId,
-      orderTitle: newBatchTitle,
-    }));
-
-    if (mode === 'new_order') {
-      const newOrder: PurchaseOrder = {
-        id: newOrderId,
-        title: newBatchTitle || `进货对货单 ${orders.length + 1}`,
-        createdAt: new Date().toISOString().split('T')[0],
-        isActive: true,
-        items: mappedItems,
-      };
-      setOrders((prev) => [...prev, newOrder]);
-      setSelectedOrderId(newOrderId);
-      setActiveView('orders');
-    } else if (mode === 'replace') {
-      const newOrder: PurchaseOrder = {
-        id: newOrderId,
-        title: newBatchTitle,
-        createdAt: new Date().toISOString().split('T')[0],
-        isActive: true,
-        items: mappedItems,
-      };
-      setOrders([newOrder]);
-      setSelectedOrderId(newOrderId);
-      setActiveView('orders');
-    } else {
-      setOrders((prev) => {
-        if (prev.length === 0) {
-          return [
-            {
-              id: newOrderId,
-              title: newBatchTitle,
-              createdAt: new Date().toISOString().split('T')[0],
-              isActive: true,
-              items: mappedItems,
-            },
-          ];
-        }
-        return prev.map((order, idx) => {
-          if (idx === 0) {
-            const maxSeq = order.items.reduce((max, it) => Math.max(max, it.seq || 0), 0);
-            const reindexed = newItems.map((it, i) => ({
-              ...it,
-              seq: maxSeq + i + 1,
-              orderId: order.id,
-              orderTitle: order.title,
-            }));
-            return {
-              ...order,
-              items: [...order.items, ...reindexed],
-            };
-          }
-          return order;
-        });
-      });
-      setActiveView('orders');
+  const handleImportItems = async (items: PurchaseItem[], title: string, mode: ReceivingMode) => {
+    const target = mode === 'new_order' ? undefined : selectedOrder ?? undefined;
+    if (target && mode === 'replace' && !confirm(`确定替换「${target.title}」的全部明细和验货记录吗？`)) {
+      return false;
     }
+    const order = await saveImport(items, title, target ? mode : 'new_order', target);
+    setSelectedOrderId(order.id);
+    setActiveView('orders');
+    return true;
+  };
+
+  const openItemDetail = (item: PurchaseItem) => {
+    setSelectedItemForDetail(allOrdersItems.find((entry) => entry.id === item.id) ?? null);
   };
 
   const handleNavigateToItem = (itemId: string) => {
@@ -468,7 +358,16 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
           {workspace === 'sales' && hasPerm('sales') && <SalesAnalyticsModule />}
           {workspace === 'settings' && <DbSettingsModule />}
 
-          {workspace === 'receiving' && hasPerm('receiving') && (
+          {workspace === 'receiving' && hasPerm('receiving') && loadState === 'loading' && (
+            <p role="status" className="text-sm text-slate-500">正在读取门店进货单…</p>
+          )}
+          {workspace === 'receiving' && hasPerm('receiving') && loadState === 'error' && (
+            <div role="alert" className="flex items-center gap-3 text-sm text-rose-700">
+              <span>无法读取门店进货单</span>
+              <button type="button" className="font-semibold underline" onClick={refresh}>重试</button>
+            </div>
+          )}
+          {workspace === 'receiving' && hasPerm('receiving') && loadState === 'ready' && (
             <>
               {activeView === 'orders' && (
                 <OrdersTableView
@@ -536,7 +435,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
                   <ScannerBar
                     items={currentOrderItems}
                     onScanMatch={handleScanMatch}
-                    onOpenItemModal={(item) => setSelectedItemForDetail(item)}
+                    onOpenItemModal={openItemDetail}
                     lastScannedItem={lastScannedItem}
                   />
 
@@ -544,6 +443,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
                     items={filteredCurrentOrderItems}
                     priceBasis={priceBasis}
                     onUpdateItem={handleUpdateItem}
+                    onAdjustQuantity={handleAdjustQuantity}
                     onSelectItemForDetail={setSelectedItemForDetail}
                     highlightedItemId={highlightedItemId}
                   />
@@ -554,7 +454,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
                 <QuickScanView
                   items={allOrdersItems}
                   onScanMatch={handleScanMatch}
-                  onOpenItemModal={(item) => setSelectedItemForDetail(item)}
+                  onOpenItemModal={openItemDetail}
                   lastScannedItem={lastScannedItem}
                   onBackToOrders={() => setActiveView('orders')}
                 />
@@ -592,12 +492,13 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary |
         onImportItems={handleImportItems}
       />
 
-      <ItemDetailDrawer
+      {selectedItemForDetail && <ItemDetailDrawer
+        key={selectedItemForDetail.id}
         item={selectedItemForDetail}
         onClose={() => setSelectedItemForDetail(null)}
         onSave={handleUpdateItem}
         priceBasis={priceBasis}
-      />
+      />}
 
       {currentStore && (
         <StoreSwitchModal
@@ -633,7 +534,7 @@ function AppGate() {
     return <StoreSelectScreen />;
   }
 
-  return <AuthenticatedWorkspace currentStore={currentStore} />;
+  return <AuthenticatedWorkspace key={currentStore.id} currentStore={currentStore} />;
 }
 
 export default function App() {

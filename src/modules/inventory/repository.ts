@@ -1,5 +1,5 @@
 import sql from 'mssql';
-import { getMssqlPool } from '../../core/db/pool';
+import { getInventoryTable, getMssqlPool } from '../../core/db/pool';
 import { SqliteSandbox } from '../../core/db/sqliteSandbox';
 import { conflictError, notFoundError } from '../../core/http/envelope';
 import {
@@ -183,12 +183,13 @@ export class MssqlInventoryRepository implements InventoryRepository {
 
   async listProducts(query: ProductListQuery, page: number, pageSize: number) {
     const pool = await getMssqlPool('sklad');
+    const table = getInventoryTable();
     const sort = validateSort(query.sortBy, query.sortDir);
     const offset = (page - 1) * pageSize;
 
     const countReq = pool.request();
     const whereSql = applyMssqlWhere(countReq, query);
-    const countRes = await countReq.query(`SELECT COUNT(*) AS total FROM dbo.g1 ${whereSql}`);
+    const countRes = await countReq.query(`SELECT COUNT(*) AS total FROM ${table} ${whereSql}`);
     const total = Number(countRes.recordset[0]?.total ?? 0);
 
     const dataReq = pool.request();
@@ -203,7 +204,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
 
     const dataRes = await dataReq.query(`
       SELECT ${G1_SELECT_COLS}
-      FROM dbo.g1
+      FROM ${table}
       ${whereSql}
       ORDER BY ${orderBy}
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
@@ -221,7 +222,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
     req.input('bc', sql.VarChar(13), barcode.trim());
     const res = await req.query(`
       SELECT TOP (1) ${G1_SELECT_COLS}
-      FROM dbo.g1
+      FROM ${getInventoryTable()}
       WHERE TRIM(Barcode) = @bc
     `);
     if (res.recordset.length === 0) return null;
@@ -230,9 +231,10 @@ export class MssqlInventoryRepository implements InventoryRepository {
 
   async createProduct(product: G1Product, changedBy: string): Promise<G1Product> {
     const pool = await getMssqlPool('sklad');
+    const table = getInventoryTable();
     const dupReq = pool.request();
     dupReq.input('bc', sql.VarChar(13), product.Barcode.trim());
-    const dupRes = await dupReq.query(`SELECT COUNT(*) AS cnt FROM dbo.g1 WHERE TRIM(Barcode) = @bc`);
+    const dupRes = await dupReq.query(`SELECT COUNT(*) AS cnt FROM ${table} WHERE TRIM(Barcode) = @bc`);
     if (Number(dupRes.recordset[0]?.cnt ?? 0) > 0) {
       throw conflictError(`条码 ${product.Barcode.trim()} 已存在，新建被拒绝（不覆盖已有行）`);
     }
@@ -245,7 +247,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
     });
 
     await insertReq.query(`
-      INSERT INTO dbo.g1 (${G1_COLUMNS.join(', ')})
+      INSERT INTO ${table} (${G1_COLUMNS.join(', ')})
       VALUES (${paramNames.join(', ')})
     `);
 
@@ -293,7 +295,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
     }
 
     await req.query(`
-      UPDATE dbo.g1
+      UPDATE ${getInventoryTable()}
       SET ${sets.join(', ')}
       WHERE TRIM(Barcode) = @bc
     `);
@@ -338,7 +340,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
     const pool = await getMssqlPool('sklad');
     const req = pool.request();
     req.input('bc', sql.VarChar(13), barcode.trim());
-    const res = await req.query(`DELETE FROM dbo.g1 WHERE TRIM(Barcode) = @bc`);
+    const res = await req.query(`DELETE FROM ${getInventoryTable()} WHERE TRIM(Barcode) = @bc`);
     return Number(res.rowsAffected[0] ?? 0) > 0;
   }
 
@@ -346,7 +348,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
     const pool = await getMssqlPool('sklad');
     const res = await pool.request().query(`
       SELECT DISTINCT TOP (300) TRIM(Supplier) AS supplier
-      FROM dbo.g1
+      FROM ${getInventoryTable()}
       WHERE Supplier IS NOT NULL AND TRIM(Supplier) <> ''
       ORDER BY supplier ASC
     `);
@@ -357,7 +359,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
     const pool = await getMssqlPool('sklad');
     const res = await pool.request().query(`
       SELECT ${G1_SELECT_COLS}, (WarningAt - COALESCE(Surplus, 0)) AS Gap
-      FROM dbo.g1
+      FROM ${getInventoryTable()}
       WHERE WarningAt > 0 AND COALESCE(Surplus, 0) <= WarningAt
       ORDER BY (WarningAt - COALESCE(Surplus, 0)) DESC, Barcode ASC
     `);
@@ -380,7 +382,7 @@ export class MssqlInventoryRepository implements InventoryRepository {
 
     const res = await req.query(`
       SELECT TOP (50000) ${G1_SELECT_COLS}
-      FROM dbo.g1
+      FROM ${getInventoryTable()}
       ${whereSql}
       ORDER BY ${orderBy}
     `);

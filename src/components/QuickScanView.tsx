@@ -46,7 +46,6 @@ export const QuickScanView: React.FC<QuickScanViewProps> = ({
     );
     if (exactBarcode) {
       onScanMatch(exactBarcode, 1);
-      onOpenItemModal(exactBarcode);
       setMatchError(null);
       setQuery('');
       return;
@@ -58,7 +57,6 @@ export const QuickScanView: React.FC<QuickScanViewProps> = ({
     );
     if (exactItemNo) {
       onScanMatch(exactItemNo, 1);
-      onOpenItemModal(exactItemNo);
       setMatchError(null);
       setQuery('');
       return;
@@ -77,7 +75,6 @@ export const QuickScanView: React.FC<QuickScanViewProps> = ({
       // Pick first match (or priority to uncompleted item)
       const target = matched.find((it) => it.receivedQty < it.expectedQty) || matched[0];
       onScanMatch(target, 1);
-      onOpenItemModal(target);
       setMatchError(null);
       setQuery('');
     } else {

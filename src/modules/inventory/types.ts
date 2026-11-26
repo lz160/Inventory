@@ -31,10 +31,11 @@ export interface G1Product {
   InstallDate: string;
   Shelves: number | null;
   LastInstallQty: number;
-  // Optional metadata enrichment from SQLite product_meta
+  // Optional product metadata
   category?: string | null;
   category_name_sk?: string | null;
   category_name_zh?: string | null;
+  name_zh?: string | null;
 }
 
 export type StockStatus = 'in' | 'low' | 'out';

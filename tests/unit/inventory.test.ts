@@ -14,7 +14,8 @@ import {
   parseInventoryWorkbook,
   resolveCategoryCode,
 } from '../../src/modules/inventory/excelTemplate';
-import { validateMssqlConfig, probeMssqlTarget } from '../../src/core/db/pool';
+import { getInventoryTable, runWithStoreContext, validateMssqlConfig, probeMssqlTarget } from '../../src/core/db/pool';
+import type { DbOverrideRow } from '../../src/core/db/metaStore';
 
 describe('M1 Inventory Unit Tests', () => {
   it('AC-INV-03 & B-07/B-33: stock status is strictly mutually exclusive across in/low/out', () => {
@@ -86,6 +87,35 @@ describe('M1 Inventory Unit Tests', () => {
 
     assert.deepEqual(clampPagination(0, 0), { page: 1, pageSize: 1 });
     assert.deepEqual(clampPagination(5, 10000), { page: 5, pageSize: 200 });
+  });
+
+  it('selects the warehouse table from the active store without affecting other stores', async () => {
+    const warehouseOverride: DbOverrideRow = {
+      target: 'sklad',
+      server: 'warehouse.internal',
+      port: 1433,
+      database_name: 'Sklad',
+      username: 'reader',
+      password: '',
+      encrypt: true,
+      trust_server_certificate: false,
+      updated_at: '2026-11-26T00:00:00.000Z',
+      inventory_table: 'sklad1',
+    };
+    const overrides = {
+      getDbOverride: (target: string, storeId?: number | null) =>
+        target === 'sklad' && storeId === 2 ? warehouseOverride : null,
+    };
+    async function queryTable(storeId: number) {
+      return runWithStoreContext(storeId, async () => {
+        await Promise.resolve();
+        return getInventoryTable();
+      }, overrides);
+    }
+
+    assert.equal(getInventoryTable(), '[dbo].[g1]');
+    assert.deepEqual(await Promise.all([queryTable(2), queryTable(1)]), ['[dbo].[sklad1]', '[dbo].[g1]']);
+    assert.equal(getInventoryTable(), '[dbo].[g1]');
   });
 
   it('Synchronized Excel template builds and round-trips category codes and catches invalid rows', () => {

@@ -53,7 +53,7 @@ export function createInventoryRouter(service: InventoryService): Router {
   router.get(
     '/import-template',
     asyncHandler(async (_req, res) => {
-      const buf = service.getImportTemplateXlsx();
+      const buf = await service.getImportTemplateXlsx();
       const filename = encodeURIComponent('inventory_import_template.xlsx');
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -106,7 +106,8 @@ export function createInventoryRouter(service: InventoryService): Router {
     '/products/:barcode/category',
     asyncHandler(async (req, res) => {
       const category = req.body?.category ? String(req.body.category) : null;
-      const meta = service.updateProductCategory(req.params.barcode, category, 'system');
+      const changedBy = (req as any).userSession?.user.username ?? 'system';
+      const meta = await service.updateProductCategory(req.params.barcode, category, changedBy, req.body?.name_zh);
       sendSuccess(res, meta);
     })
   );
@@ -135,6 +136,13 @@ export function createInventoryRouter(service: InventoryService): Router {
     asyncHandler(async (_req, res) => {
       const result = await service.listLowStock();
       sendSuccess(res, result);
+    })
+  );
+
+  router.get(
+    '/categories',
+    asyncHandler(async (_req, res) => {
+      sendSuccess(res, await service.listCategories());
     })
   );
 

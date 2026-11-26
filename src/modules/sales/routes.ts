@@ -8,7 +8,7 @@ export function createSalesRouter(service: SalesService): Router {
   router.get(
     '/categories',
     asyncHandler(async (_req, res) => {
-      sendSuccess(res, service.listCategories());
+      sendSuccess(res, await service.listCategories());
     })
   );
 
@@ -147,7 +147,8 @@ export function createSalesRouter(service: SalesService): Router {
   router.post(
     '/auto-categorize',
     asyncHandler(async (req, res) => {
-      const result = service.autoCategorize(req.body?.items, 'system');
+      const updatedBy = (req as any).userSession?.user.username ?? 'system';
+      const result = await service.autoCategorize(req.body?.items, updatedBy);
       sendSuccess(res, result);
     })
   );

@@ -11,7 +11,7 @@ interface ImportModalProps {
     newItems: PurchaseItem[],
     batchTitle: string,
     mode: 'new_order' | 'replace' | 'append'
-  ) => void;
+  ) => Promise<boolean>;
 }
 
 export const ImportModal: React.FC<ImportModalProps> = ({
@@ -24,8 +24,8 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   const [rawText, setRawText] = useState('');
   const [importMode, setImportMode] = useState<'new_order' | 'replace' | 'append'>('new_order');
   const [copiedTemplate, setCopiedTemplate] = useState(false);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -83,23 +83,30 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     }
   };
 
-  const handleConfirmTextImport = () => {
+  const handleConfirmTextImport = async () => {
     const parsed = parseImportText(rawText);
     if (parsed.length === 0) {
       alert('未能解析出有效的进货单商品，请确认已粘贴或输入包含 序号、品名、单价、条码、数量 等列的文本');
       return;
     }
-    onImportItems(parsed, batchTitle || '新建进货批次', importMode);
-    onClose();
+    setIsImporting(true);
+    setImportError(null);
+    try {
+      if (await onImportItems(parsed, batchTitle || '新建进货批次', importMode)) onClose();
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : '进货单导入失败');
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   const handleAiParse = async () => {
     if (!rawText.trim()) {
-      setAiError('请先在下方输入或粘贴进货单文本或不规则表格');
+      setImportError('请先在下方输入或粘贴进货单文本或不规则表格');
       return;
     }
-    setAiLoading(true);
-    setAiError(null);
+    setIsImporting(true);
+    setImportError(null);
     try {
       const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
       const res = await fetch('/api/parse-invoice', {
@@ -129,15 +136,14 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           actualBilledPrice: Number(it.discountPrice) || Number(it.unitPrice) || 0,
           notes: '',
         }));
-        onImportItems(mapped, batchTitle || 'AI智能识别进货单', importMode);
-        onClose();
+        if (await onImportItems(mapped, batchTitle || 'AI智能识别进货单', importMode)) onClose();
       } else {
         throw new Error('未识别到有效的商品条目');
       }
     } catch (err: any) {
-      setAiError(err.message || 'AI解析失败，建议直接使用文本格式快速粘贴导入');
+      setImportError(err.message || 'AI解析失败，建议直接使用文本格式快速粘贴导入');
     } finally {
-      setAiLoading(false);
+      setIsImporting(false);
     }
   };
 
@@ -154,6 +160,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           </div>
           <button
             onClick={onClose}
+            disabled={isImporting}
             className="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100"
           >
             <X className="w-5 h-5" />
@@ -297,10 +304,10 @@ export const ImportModal: React.FC<ImportModalProps> = ({
             </label>
           </div>
 
-          {aiError && (
+          {importError && (
             <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 p-2.5 rounded-lg flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{aiError}</span>
+              <span>{importError}</span>
             </div>
           )}
         </div>
@@ -314,6 +321,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
             <button
               type="button"
               onClick={onClose}
+              disabled={isImporting}
               className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100"
             >
               取消
@@ -322,20 +330,20 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               <button
                 type="button"
                 onClick={handleConfirmTextImport}
-                disabled={!rawText.trim()}
+                disabled={isImporting || !rawText.trim()}
                 className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors shadow-xs"
               >
-                确认导入进货单
+                {isImporting ? '正在保存进货单…' : '确认导入进货单'}
               </button>
             ) : (
               <button
                 type="button"
                 onClick={handleAiParse}
-                disabled={aiLoading || !rawText.trim()}
+                disabled={isImporting || !rawText.trim()}
                 className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors shadow-xs inline-flex items-center gap-1.5"
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>{aiLoading ? '正在智能提取中...' : '开始AI智能解析'}</span>
+                <span>{isImporting ? '正在智能提取中...' : '开始AI智能解析'}</span>
               </button>
             )}
           </div>

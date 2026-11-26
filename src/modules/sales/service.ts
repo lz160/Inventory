@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { MetaStore } from '../../core/db/metaStore';
+import type { ProductMetadataStore } from '../../core/db/productMetadataStore';
 import { validationError } from '../../core/http/envelope';
 import { formatBratislavaDate } from '../stocktake/validators';
 import {
@@ -26,7 +26,7 @@ import {
 } from './types';
 
 export class SalesService {
-  constructor(private repo: SalesRepository, private metaStore: MetaStore) {}
+  constructor(private repo: SalesRepository, private metaStore: ProductMetadataStore) {}
 
   private enrichSoldRows(
     aggRows: Array<{ Barcode: string; FallbackNazov: string | null; SoldQty: number; Revenue: number }>,
@@ -264,9 +264,11 @@ export class SalesService {
       q: query.q,
     });
 
-    const categories = this.metaStore.listCategories();
+    const [categories, metaMap] = await Promise.all([
+      this.metaStore.listCategories(),
+      this.metaStore.getAllProductMetaMap(agg.map((row) => row.Barcode)),
+    ]);
     const catLookup = new Map(categories.map((c) => [c.code, c]));
-    const metaMap = this.metaStore.getAllProductMetaMap();
 
     const buckets = new Map<
       string,
@@ -361,8 +363,11 @@ export class SalesService {
       q: query.q,
     });
 
-    const metaMap = this.metaStore.getAllProductMetaMap();
-    const catMap = new Map(this.metaStore.listCategories().map((c) => [c.code, c]));
+    const [categories, metaMap] = await Promise.all([
+      this.metaStore.listCategories(),
+      this.metaStore.getAllProductMetaMap(agg.map((row) => row.Barcode)),
+    ]);
+    const catMap = new Map(categories.map((c) => [c.code, c]));
     const uncatAgg = agg.filter((a) => !metaMap.get(a.Barcode)?.category);
 
     const g1Map = await this.repo.getAllG1ProductsForEnrichment(uncatAgg.slice(0, 2000).map((a) => a.Barcode));
@@ -399,10 +404,10 @@ export class SalesService {
   }
 
   // Explicit transactional write (§5.2 #9, §7.4, AC-SAL-13)
-  autoCategorize(
+  async autoCategorize(
     itemsInput: unknown,
     updatedBy: string
-  ): { applied: number } {
+  ): Promise<{ applied: number }> {
     if (!Array.isArray(itemsInput) || itemsInput.length === 0) {
       throw validationError('请提供至少一条待归类商品记录');
     }
@@ -415,12 +420,15 @@ export class SalesService {
       category: String(it?.category ?? '').trim(),
     }));
 
-    try {
-      const applied = this.metaStore.batchUpsertCategories(items, updatedBy);
-      return { applied };
-    } catch (err: any) {
-      throw validationError(err?.message || '批量归类参数校验失败');
+    const validCategories = new Set((await this.metaStore.listCategories()).map((category) => category.code));
+    for (const item of items) {
+      if (!item.barcode) throw validationError('条码不能为空');
+      if (item.barcode.length > 128) throw validationError('条码长度不能超过 128 位');
+      if (!validCategories.has(item.category)) {
+        throw validationError(`无效的品类编码: ${item.category}`);
+      }
     }
+    return { applied: await this.metaStore.batchUpsertCategories(items, updatedBy) };
   }
 
   listCategories() {

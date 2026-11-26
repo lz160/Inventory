@@ -1,5 +1,5 @@
 import sql from 'mssql';
-import { getMssqlPool } from '../../core/db/pool';
+import { getInventoryTable, getMssqlPool } from '../../core/db/pool';
 import { SqliteSandbox } from '../../core/db/sqliteSandbox';
 import { notFoundError, serverError } from '../../core/http/envelope';
 import { StocktakeHead, StocktakeLine, StocktakeListRow } from './types';
@@ -121,7 +121,7 @@ export class MssqlStocktakeRepository implements StocktakeRepository {
     req.input('bc', sql.VarChar(13), barcode.trim());
     const res = await req.query(`
       SELECT TOP (1) Barcode, Nazov, Surplus
-      FROM dbo.g1
+      FROM ${getInventoryTable()}
       WHERE TRIM(Barcode) = @bc
     `);
     if (res.recordset.length === 0) return null;
@@ -136,7 +136,7 @@ export class MssqlStocktakeRepository implements StocktakeRepository {
   /**
    * Cross-database two-step write (§6.2, §7.4):
    * Step 1: Upsert SaleData.dbo.StocktakeLine
-   * Step 2: Immediately UPDATE SKLAD.dbo.g1 SET Surplus = @countedQty [, WarningAt = @warningAt]
+   * Step 2: Update the configured inventory table's Surplus and optional WarningAt.
    * Never swallows Step 2 failure (B-30 / §9.4).
    */
   async upsertLineAndSyncG1(params: {
@@ -206,12 +206,12 @@ export class MssqlStocktakeRepository implements StocktakeRepository {
       savedLine = normalizeLine(insRes.recordset[0]);
     }
 
-    // Step 2: Immediate SKLAD.dbo.g1 write-back
+    // Step 2: Immediate inventory write-back.
     try {
       const g1Req = skladPool.request();
       g1Req.input('bc', sql.VarChar(13), bc);
       g1Req.input('Surplus', sql.Real, params.countedQty);
-      let sqlStr = `UPDATE dbo.g1 SET Surplus = @Surplus`;
+      let sqlStr = `UPDATE ${getInventoryTable()} SET Surplus = @Surplus`;
       if (params.hasWarningAt && params.warningAt !== null) {
         g1Req.input('WarningAt', sql.SmallInt, params.warningAt);
         sqlStr += `, WarningAt = @WarningAt`;
@@ -219,14 +219,14 @@ export class MssqlStocktakeRepository implements StocktakeRepository {
       sqlStr += ` WHERE TRIM(Barcode) = @bc`;
       const g1Res = await g1Req.query(sqlStr);
       if (Number(g1Res.rowsAffected[0] ?? 0) === 0) {
-        throw new Error(`条码 ${bc} 在 g1 未找到更新目标`);
+        throw new Error(`门店库存主表中找不到条码 ${bc}`);
       }
     } catch (err: any) {
       console.error(
-        `[Stocktake Sync Error] Step 1 StocktakeLine written (stocktake=${params.stocktakeId}, barcode=${bc}), Step 2 g1 UPDATE failed: ${err?.message}`
+        `[Stocktake Sync Error] StocktakeLine written (stocktake=${params.stocktakeId}, barcode=${bc}), inventory update failed: ${err?.message}`
       );
       throw serverError(
-        `盘点行已记录，但回写门店库存主表 g1 失败（请重扫该条码以重试同步）：${err?.message || '数据库错误'}`
+        `盘点行已记录，但回写门店库存主表失败（请重扫该条码以重试同步）：${err?.message || '数据库错误'}`
       );
     }
 

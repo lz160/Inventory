@@ -1,0 +1,16 @@
+[Unit]
+Description=Receiving Workbench SQL Server
+BindsTo=docker.service
+After=docker.service
+ConditionPathIsMountPoint=/srv/receiving-sql
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+ExecStart=/usr/local/lib/receiving-sql/receiving-sql.sh run
+ExecStartPost=/usr/local/lib/receiving-sql/receiving-sql.sh wait
+ExecStop=-/usr/bin/docker stop -t 30 receiving-sql
+TimeoutStartSec=105
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=15

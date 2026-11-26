@@ -1,5 +1,5 @@
 import sql from 'mssql';
-import { getMssqlPool } from '../../core/db/pool';
+import { getInventoryTable, getMssqlPool } from '../../core/db/pool';
 import { SqliteSandbox } from '../../core/db/sqliteSandbox';
 import { bratislavaLocalMidnightToUtc, addDaysYyyyMmDd, toBratislavaLocalDate } from './analytics';
 import { SalesSummaryResult } from './types';
@@ -146,6 +146,7 @@ export class MssqlSalesRepository implements SalesRepository {
 
   async getAllG1ProductsForEnrichment(barcodes?: string[]): Promise<Map<string, G1SalesEnrichment>> {
     const pool = await getMssqlPool('sklad');
+    const table = getInventoryTable();
     const map = new Map<string, G1SalesEnrichment>();
 
     if (barcodes && barcodes.length > 0) {
@@ -161,7 +162,7 @@ export class MssqlSalesRepository implements SalesRepository {
         });
         const res = await req.query(`
           SELECT TRIM(Barcode) AS Barcode, Nazov, Cena, Cena2, Surplus, WarningAt
-          FROM dbo.g1
+          FROM ${table}
           WHERE TRIM(Barcode) IN (${ph.join(', ')})
         `);
         for (const r of res.recordset) {
@@ -181,7 +182,7 @@ export class MssqlSalesRepository implements SalesRepository {
 
     const res = await pool.request().query(`
       SELECT TRIM(Barcode) AS Barcode, Nazov, Cena, Cena2, Surplus, WarningAt
-      FROM dbo.g1
+      FROM ${table}
     `);
     for (const r of res.recordset) {
       const bc = String(r.Barcode ?? '').trim();
@@ -201,7 +202,7 @@ export class MssqlSalesRepository implements SalesRepository {
     const pool = await getMssqlPool('sklad');
     const res = await pool.request().query(`
       SELECT TRIM(Barcode) AS Barcode, Nazov, Cena, Cena2, Surplus, WarningAt
-      FROM dbo.g1
+      FROM ${getInventoryTable()}
       WHERE Surplus > 0
       ORDER BY Barcode ASC
     `);

@@ -19,6 +19,7 @@ import {
   InventoryImportMode,
   InventoryImportResult,
 } from '../../modules/inventory/types';
+import type { CategoryDef } from '../../modules/sales/category-rules';
 
 interface InventoryImportModalProps {
   isOpen: boolean;
@@ -80,8 +81,11 @@ export const InventoryImportModal: React.FC<InventoryImportModalProps> = ({
     setResult(null);
     setFileName(file.name);
     try {
-      const buf = await file.arrayBuffer();
-      const parsed = parseInventoryWorkbook(buf);
+      const [buf, categories] = await Promise.all([
+        file.arrayBuffer(),
+        apiCall<CategoryDef[]>('/api/g1/categories'),
+      ]);
+      const parsed = parseInventoryWorkbook(buf, categories);
       setParsedRows(parsed.parsedRows);
       setValidItems(parsed.validItems);
       setParseErrorCount(parsed.errorCount);

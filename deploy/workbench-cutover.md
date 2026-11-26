@@ -1,0 +1,11 @@
+# Workbench SQL cutover
+
+Production runs from `/opt/receiving-workbench-sql`. Its systemd drop-in keeps the Nginx application listener on 127.0.0.1:3096 and adds the SQL unit dependency. The app service uses the central account and a separate, restricted database account per store. The privileged SQL credential is read only by the provisioning and backup services.
+
+1. Build the release with the repository Bun lock and `npm run build`. Stage it on a private loopback port.
+2. Set the DB runtime configuration in the root-owned `/srv/receiving-sql/app.env`. Set `OP_SQL_ADMIN_PASSWORD_FILE=/srv/receiving-sql/private/sa-password` only in the provisioning shell. Run `node --import tsx scripts/provisionHostedSql.ts init`. Run the same script with `migrate-identity <sqlite-snapshot>` for the initial migration. Provide a consistent SQLite backup that includes users, role permissions, stores, and configurations. Existing browser orders are excluded and users sign in again.
+3. Verify the private release, database backup, permissions, and migrated identity counts. Stop the old workbench briefly and confirm that the old identity tables still match the snapshot. Install `receiving-workbench-hosted.conf` as a drop-in for `receiving-workbench.service` and start the workbench.
+4. Install the provision service and timer. Newly registered stores get their isolated SQL database and restricted login on the next timer run. Run `systemctl start receiving-store-provision.service` to provision immediately.
+5. Before accepting live changes, rollback can remove that drop-in and restart the original workbench against its original SQLite file. If users have written into SQL after cutover, preserve the SQL databases and reconcile those changes before rolling back. The legacy SQLite database is retained on the encrypted volume. To start the old release from that copy, restore a writable SQLite copy at its original path with the receiving-op owner and mode 0640, or point the old service to a readable encrypted location.
+
+After an OS reboot, unlock the encrypted volume using the separate recovery key. Then start `receiving-sql.service`, `receiving-workbench.service`, and verify the provisioning and backup timers. See [SQL Server deployment and restore](README.md).

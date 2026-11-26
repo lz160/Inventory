@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { X, Upload, FileText, Sparkles, AlertCircle, Copy, Check, FileSpreadsheet } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { parseImportText, PurchaseItem, getSamplePurchaseItems } from '../utils/reconciliation';
+import { getAuthHeaders } from '../utils/imsApi';
 
 interface ImportModalProps {
   isOpen: boolean;
@@ -100,9 +101,10 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     setAiLoading(true);
     setAiError(null);
     try {
+      const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
       const res = await fetch('/api/parse-invoice', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ text: rawText }),
       });
       const data = await res.json();

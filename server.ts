@@ -14,12 +14,14 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
-// Gemini AI client initialization
-const apiKey = process.env.GEMINI_API_KEY;
-const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+import { mountImsRoutes } from './src/imsApp';
+import { closeAllMssqlPools } from './src/core/db/pool';
+import { apiErrorMiddleware } from './src/core/http/envelope';
+
+const { requireReceivingAuth } = mountImsRoutes(app);
 
 // API to parse unstructured text / invoice image into 10-column template format
-app.post('/api/parse-invoice', async (req, res) => {
+app.post('/api/parse-invoice', ...requireReceivingAuth, async (req, res) => {
   try {
     const { text, imageBase64, mimeType } = req.body;
 
@@ -93,10 +95,11 @@ app.post('/api/parse-invoice', async (req, res) => {
   }
 });
 
-import { mountImsRoutes } from './src/imsApp';
-import { closeAllMssqlPools } from './src/core/db/pool';
+app.use('/api/parse-invoice', apiErrorMiddleware);
 
-mountImsRoutes(app);
+// Gemini AI client initialization
+const apiKey = process.env.GEMINI_API_KEY;
+const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 // Production or Vite development middleware setup
 async function startServer() {

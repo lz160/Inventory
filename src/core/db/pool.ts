@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import sql from 'mssql';
 import { serverError } from '../http/envelope';
 import type { DbOverrideRow, DbOverrideTarget } from './metaStore';
@@ -5,7 +6,34 @@ import type { DbOverrideRow, DbOverrideTarget } from './metaStore';
 export type DbTarget = DbOverrideTarget;
 
 export interface DbOverrideStore {
-  getDbOverride(target: DbTarget): DbOverrideRow | null;
+  getDbOverride(target: DbTarget, storeId?: number | null): DbOverrideRow | null;
+}
+
+export interface StoreRequestContext {
+  storeId: number | null;
+  overrideStore?: DbOverrideStore | null;
+}
+
+const storeContextAls = new AsyncLocalStorage<StoreRequestContext>();
+
+export function runWithStoreContext<T>(
+  storeId: number | null,
+  fn: () => T,
+  overrideStore?: DbOverrideStore | null
+): T {
+  return storeContextAls.run({ storeId, overrideStore }, fn);
+}
+
+export function getActiveStoreId(): number | null {
+  return storeContextAls.getStore()?.storeId ?? null;
+}
+
+function getActiveOverrideStore(): DbOverrideStore | null {
+  const ctx = storeContextAls.getStore();
+  if (ctx && ctx.overrideStore !== undefined) {
+    return ctx.overrideStore;
+  }
+  return activeOverrideStore;
 }
 
 export interface MssqlPoolConfig {
@@ -102,13 +130,17 @@ export function getMssqlConfigFromEnv(target: DbTarget): MssqlPoolConfig {
   };
 }
 
-export function getEffectiveMssqlConfig(target: DbTarget): {
+export function getEffectiveMssqlConfig(
+  target: DbTarget,
+  explicitStoreId?: number | null
+): {
   cfg: MssqlPoolConfig;
   source: 'override' | 'env';
   updatedAt?: string;
 } {
+  const storeId = explicitStoreId !== undefined ? explicitStoreId : getActiveStoreId();
   const envCfg = getMssqlConfigFromEnv(target);
-  const override = activeOverrideStore?.getDbOverride(target) || null;
+  const override = getActiveOverrideStore()?.getDbOverride(target, storeId) || null;
   if (!override) {
     return { cfg: envCfg, source: 'env' };
   }
@@ -213,8 +245,10 @@ export function isMssqlConfigured(target: DbTarget): boolean {
   return Boolean(cfg.server && cfg.user);
 }
 
-function getPoolKey(cfg: MssqlPoolConfig): string {
-  return `${cfg.server}:${cfg.port}/${cfg.database}/${cfg.user}/${cfg.encrypt ? 1 : 0}/${cfg.trustServerCertificate ? 1 : 0}`;
+function getPoolKey(cfg: MssqlPoolConfig, storeId?: number | null): string {
+  const sid = storeId !== undefined ? storeId : getActiveStoreId();
+  const prefix = sid !== null && sid !== undefined ? `store:${sid}` : 'store:global';
+  return `${prefix}:${cfg.server}:${cfg.port}/${cfg.database}/${cfg.user}/${cfg.encrypt ? 1 : 0}/${cfg.trustServerCertificate ? 1 : 0}`;
 }
 
 /**
@@ -470,9 +504,34 @@ export async function probeMssqlTarget(
 }
 
 /**
- * Closes all cached pools (used on config update or graceful shutdown).
+ * Closes cached pools (scoped to a storeId if supplied, or all pools).
  */
-export async function closeAllMssqlPools(): Promise<void> {
+export async function closeAllMssqlPools(storeId?: number | null): Promise<void> {
+  if (storeId !== undefined && storeId !== null) {
+    const prefix = `store:${storeId}:`;
+    const matching: sql.ConnectionPool[] = [];
+    for (const [k, p] of poolCache.entries()) {
+      if (k.startsWith(prefix)) {
+        matching.push(p);
+        poolCache.delete(k);
+      }
+    }
+    for (const k of Array.from(poolConnecting.keys())) {
+      if (k.startsWith(prefix)) poolConnecting.delete(k);
+    }
+    for (const k of Array.from(failedPoolCache.keys())) {
+      if (k.startsWith(prefix)) failedPoolCache.delete(k);
+    }
+    await Promise.all(
+      matching.map(async (p) => {
+        try {
+          await p.close();
+        } catch {}
+      })
+    );
+    return;
+  }
+
   const pools = Array.from(poolCache.values());
   poolCache.clear();
   poolConnecting.clear();

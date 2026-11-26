@@ -10,8 +10,32 @@ export class ImsApiError extends Error {
   }
 }
 
+// Memory-only Bearer token (never persisted to localStorage or sessionStorage)
+let inMemoryAuthToken: string | null = null;
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setImsAuthToken(token: string | null): void {
+  inMemoryAuthToken = token ? token.trim() : null;
+}
+
+export function getImsAuthToken(): string | null {
+  return inMemoryAuthToken;
+}
+
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
+}
+
+export function getAuthHeaders(extraHeaders?: HeadersInit): Headers {
+  const headers = new Headers(extraHeaders || {});
+  if (inMemoryAuthToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${inMemoryAuthToken}`);
+  }
+  return headers;
+}
+
 export async function imsFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers || {});
+  const headers = getAuthHeaders(options.headers);
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
@@ -31,6 +55,11 @@ export async function imsFetch<T>(url: string, options: RequestInit = {}): Promi
     }
   }
 
+  if (res.status === 401 && !url.startsWith('/api/auth/')) {
+    inMemoryAuthToken = null;
+    unauthorizedHandler?.();
+  }
+
   if (!res.ok || (payload && payload.code !== 0)) {
     const errCode = Number(payload?.code || 50000);
     const msg = payload?.message || payload?.error || `HTTP ${res.status} 请求失败`;
@@ -41,7 +70,14 @@ export async function imsFetch<T>(url: string, options: RequestInit = {}): Promi
 }
 
 export async function downloadImsXlsx(url: string, fallbackFilename: string): Promise<void> {
-  const res = await fetch(url);
+  const res = await fetch(url, {
+    headers: getAuthHeaders(),
+  });
+
+  if (res.status === 401) {
+    inMemoryAuthToken = null;
+    unauthorizedHandler?.();
+  }
 
   if (!res.ok) {
     let msg = `导出失败 (HTTP ${res.status})`;

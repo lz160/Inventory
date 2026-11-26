@@ -11,20 +11,27 @@ let server: http.Server;
 let baseUrl = '';
 let sandbox: SqliteSandbox;
 let metaStore: MetaStore;
+let adminToken = '';
+let authToken = ''; // manager token for M1/M3/M2 operational tests
 
-async function reqJson(path: string, init: RequestInit = {}) {
+async function reqJson(path: string, init: RequestInit = {}, tokenOverride?: string | null) {
+  const token = tokenOverride === undefined ? authToken : tokenOverride;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((init.headers as Record<string, string>) || {}),
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   const res = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init.headers || {}),
-    },
+    headers,
   });
   const body = await res.json();
   return { status: res.status, body };
 }
 
-describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
+describe('IMS M1 / M3 / M2 & Multi-Store Full E2E Integration Acceptance Tests', () => {
   before(async () => {
     sandbox = new SqliteSandbox(':memory:', true);
     metaStore = new MetaStore(':memory:');
@@ -36,6 +43,68 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
         resolve();
       });
     });
+    const boot = await reqJson(
+      '/api/auth/bootstrap',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          username: 'admin',
+          displayName: 'System Admin',
+          password: 'AdminPass123!',
+          storeCode: 'MAIN01',
+          storeName: 'Test Main Store',
+        }),
+      },
+      null
+    );
+    assert.equal(boot.status, 201);
+    adminToken = boot.body.data.token;
+    assert.ok(adminToken);
+    assert.equal(boot.body.data.user.username, 'admin');
+    assert.deepEqual(boot.body.data.user.permissions, ['db_settings', 'user_mgmt']);
+    assert.equal(boot.body.data.currentStore, null);
+    assert.equal(boot.body.data.availableStores[0].storeCode, 'MAIN01');
+
+    // Admin creates a store manager account with full operational permissions for M1/M3/M2 E2E suites
+    const createMgr = await reqJson(
+      '/api/users',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          username: 'mgr01',
+          displayName: 'Main Store Manager',
+          password: 'MgrPass123!',
+          role: 'manager',
+          permissions: ['receiving', 'inventory', 'stocktake', 'sales', 'db_settings'],
+          allStores: true,
+          assignedStoreIds: [1],
+          isActive: true,
+        }),
+      },
+      adminToken
+    );
+    assert.equal(createMgr.status, 201);
+    assert.deepEqual(createMgr.body.data.permissions, ['receiving', 'inventory', 'stocktake', 'sales']);
+
+    const mgrLogin = await reqJson(
+      '/api/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ username: 'mgr01', password: 'MgrPass123!' }),
+      },
+      null
+    );
+    assert.equal(mgrLogin.status, 200);
+    authToken = mgrLogin.body.data.token;
+    const mgrSelect = await reqJson(
+      '/api/auth/select-store',
+      {
+        method: 'POST',
+        body: JSON.stringify({ storeId: 1 }),
+      },
+      authToken
+    );
+    assert.equal(mgrSelect.status, 200);
   });
 
   after(async () => {
@@ -154,14 +223,18 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
     assert.deepEqual(supRes.body.data, [...supRes.body.data].sort());
 
     // Export XLSX sanity
-    const xlsxRes = await fetch(`${baseUrl}/api/g1/export`);
+    const xlsxRes = await fetch(`${baseUrl}/api/g1/export`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
     assert.equal(xlsxRes.status, 200);
     const buf = Buffer.from(await xlsxRes.arrayBuffer());
     const wb = XLSX.read(buf, { type: 'buffer' });
     assert.ok(wb.SheetNames.includes('Inventory'));
 
     // Import template XLSX download & bulk upsert import
-    const tplRes = await fetch(`${baseUrl}/api/g1/import-template`);
+    const tplRes = await fetch(`${baseUrl}/api/g1/import-template`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
     assert.equal(tplRes.status, 200);
     const tplWb = XLSX.read(Buffer.from(await tplRes.arrayBuffer()), { type: 'buffer' });
     assert.ok(tplWb.SheetNames.includes('Inventory'));
@@ -262,7 +335,9 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
     assert.equal(detail.body.data.lines[0].CountedQty, 9);
 
     // Export stocktake XLSX
-    const expRes = await fetch(`${baseUrl}/api/stocktakes/${id}/export`);
+    const expRes = await fetch(`${baseUrl}/api/stocktakes/${id}/export`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
     assert.equal(expRes.status, 200);
 
     // AC-STK-07: submit locks stocktake
@@ -368,7 +443,9 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
     assert.equal(dstDay.body.data.totalQty, 1);
 
     // Sales XLSX export sanity
-    const expSales = await fetch(`${baseUrl}/api/sales/export`);
+    const expSales = await fetch(`${baseUrl}/api/sales/export`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
     assert.equal(expSales.status, 200);
   });
 
@@ -384,11 +461,76 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
       });
     });
     try {
-      const res = await fetch(`${url}/api/g1/products`);
+      const bootRes = await fetch(`${url}/api/auth/bootstrap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'admin',
+          displayName: 'MSSQL Admin',
+          password: 'PassWord123',
+          storeCode: 'MSSQL01',
+          storeName: 'MSSQL Store',
+        }),
+      });
+      const bootBody = await bootRes.json();
+      const adminTok = bootBody.data.token;
+
+      // Admin cannot query operational inventory directly (403)
+      const adminInv = await fetch(`${url}/api/g1/products`, {
+        headers: { Authorization: `Bearer ${adminTok}` },
+      });
+      assert.equal(adminInv.status, 403);
+
+      // Admin creates manager account to test unconfigured MSSQL fast-fail (500/50000)
+      await fetch(`${url}/api/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminTok}` },
+        body: JSON.stringify({
+          username: 'mgr_mssql',
+          displayName: 'MSSQL Manager',
+          password: 'PassWord123',
+          role: 'manager',
+          permissions: ['inventory'],
+          allStores: true,
+        }),
+      });
+      const mgrLoginRes = await fetch(`${url}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'mgr_mssql', password: 'PassWord123' }),
+      });
+      const mgrTok = (await mgrLoginRes.json()).data.token;
+      await fetch(`${url}/api/auth/select-store`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${mgrTok}` },
+        body: JSON.stringify({ storeId: 1 }),
+      });
+
+      const res = await fetch(`${url}/api/g1/products`, {
+        headers: { Authorization: `Bearer ${mgrTok}` },
+      });
       const body = await res.json();
       assert.equal(res.status, 500);
       assert.equal(body.code, 50000);
       assert.match(body.message, /尚未配置|SQL Server/);
+
+      // Non-admin /api/ims/context omits targetInfo & raw error details
+      const mgrCtxRes = await fetch(`${url}/api/ims/context`, {
+        headers: { Authorization: `Bearer ${mgrTok}` },
+      });
+      const mgrCtxBody = await mgrCtxRes.json();
+      assert.equal(mgrCtxRes.status, 200);
+      assert.equal(mgrCtxBody.data.dbStatus.sklad.ok, false);
+      assert.equal('targetInfo' in mgrCtxBody.data.dbStatus.sklad, false);
+      assert.equal('error' in mgrCtxBody.data.dbStatus.sklad, false);
+
+      // Admin /api/ims/context?storeId=1 retains targetInfo diagnostics
+      const adminCtxRes = await fetch(`${url}/api/ims/context?storeId=1`, {
+        headers: { Authorization: `Bearer ${adminTok}` },
+      });
+      const adminCtxBody = await adminCtxRes.json();
+      assert.equal(adminCtxRes.status, 200);
+      assert.equal('targetInfo' in adminCtxBody.data.dbStatus.sklad, true);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
       isolatedMeta.close();
@@ -407,8 +549,26 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
       });
     });
     try {
+      const bootRes = await fetch(`${url}/api/auth/bootstrap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'admin',
+          displayName: 'Config Admin',
+          password: 'PassWord123',
+          storeCode: 'CFG01',
+          storeName: 'Config Store',
+        }),
+      });
+      const bootBody = await bootRes.json();
+      const token = bootBody.data.token;
+      assert.equal(bootBody.data.currentStore, null);
+      const storeId = bootBody.data.availableStores[0].id;
+
       // 1. Initial GET masks password & defaults to unconfigured/env
-      const initRes = await fetch(`${url}/api/ims/db-config`);
+      const initRes = await fetch(`${url}/api/ims/db-config`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       const initBody = await initRes.json();
       assert.equal(initRes.status, 200);
       assert.equal('password' in initBody.data.sklad, false);
@@ -418,7 +578,7 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
       // 2. Test endpoint rejects numeric-only host cleanly without persisting
       const badTestRes = await fetch(`${url}/api/ims/db-config/test`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           target: 'sklad',
           config: { server: '5258', port: 1433, database: 'SKLAD', user: 'sa', password: 'secret' },
@@ -432,7 +592,7 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
       // 3. PUT validates bad host with 422/42201
       const badPutRes = await fetch(`${url}/api/ims/db-config`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           sklad: { server: '5258', port: 1433, database: 'SKLAD', user: 'sa', password: 'secret' },
         }),
@@ -444,7 +604,7 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
       // 4. PUT saves SKLAD + SaleData overrides (syncPasswordFromSklad copies password cleanly)
       const saveRes = await fetch(`${url}/api/ims/db-config`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           sklad: {
             server: '127.0.0.1',
@@ -476,12 +636,12 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
       assert.equal(saveBody.data.sklad.trustServerCertificate, false);
       assert.equal('password' in saveBody.data.sklad, false);
       assert.equal('password' in saveBody.data.saledata, false);
-      assert.equal(cfgMeta.getDbOverride('saledata')?.password, 'MyStrongPassword!1');
+      assert.equal(cfgMeta.getDbOverride('saledata', storeId)?.password, 'MyStrongPassword!1');
 
       // 5. Partial update without password preserves stored password
       const partialRes = await fetch(`${url}/api/ims/db-config`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           sklad: {
             server: '10.0.0.5',
@@ -496,19 +656,405 @@ describe('IMS M1 / M3 / M2 Full E2E Integration Acceptance Tests', () => {
       assert.equal(partialBody.data.sklad.server, '10.0.0.5');
       assert.equal(partialBody.data.sklad.port, 14330);
       assert.equal(partialBody.data.sklad.hasPassword, true);
-      assert.equal(cfgMeta.getDbOverride('sklad')?.password, 'MyStrongPassword!1');
+      assert.equal(cfgMeta.getDbOverride('sklad', storeId)?.password, 'MyStrongPassword!1');
 
       // 6. DELETE resets overrides back to env defaults
-      const resetRes = await fetch(`${url}/api/ims/db-config`, { method: 'DELETE' });
+      const resetRes = await fetch(`${url}/api/ims/db-config`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
       const resetBody = await resetRes.json();
       assert.equal(resetRes.status, 200);
       assert.notEqual(resetBody.data.sklad.source, 'override');
       assert.notEqual(resetBody.data.saledata.source, 'override');
-      assert.equal(cfgMeta.getDbOverride('sklad'), null);
-      assert.equal(cfgMeta.getDbOverride('saledata'), null);
+      assert.equal(cfgMeta.getDbOverride('sklad', storeId), null);
+      assert.equal(cfgMeta.getDbOverride('saledata', storeId), null);
     } finally {
       await new Promise<void>((resolve) => srv.close(() => resolve()));
       cfgMeta.close();
     }
+  });
+
+  it('AUTH-STORE-01..06 & RBAC-01..04: account permissions, store assignment, post-login store selection, last-admin guard, and per-store isolation', async () => {
+    // 1. Unauthenticated requests fail with 401/40100
+    for (const protectedPath of [
+      '/api/g1/products',
+      '/api/stocktakes',
+      '/api/sales/summary',
+      '/api/ims/db-config',
+      '/api/stores',
+      '/api/users',
+    ]) {
+      const unauth = await reqJson(protectedPath, {}, null);
+      assert.equal(unauth.status, 401, `Expected 401 for unauthenticated ${protectedPath}`);
+      assert.equal(unauth.body.code, 40100);
+    }
+
+    const unauthSelect = await reqJson(
+      '/api/auth/select-store',
+      { method: 'POST', body: JSON.stringify({ storeId: 1 }) },
+      null
+    );
+    assert.equal(unauthSelect.status, 401);
+
+    // 2. Second bootstrap is blocked with 403/40300
+    const secondBoot = await reqJson(
+      '/api/auth/bootstrap',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          username: 'rogue',
+          displayName: 'Rogue',
+          password: 'Password123',
+          storeCode: 'HACK01',
+          storeName: 'Rogue Store',
+        }),
+      },
+      null
+    );
+    assert.equal(secondBoot.status, 403);
+    assert.equal(secondBoot.body.code, 40300);
+
+    // 3. Admin-only boundary: admin gets 403 on operational endpoints and select-store, and creating another admin strips operational permissions
+    for (const opPath of ['/api/g1/products', '/api/stocktakes', '/api/sales/summary']) {
+      const adminOp = await reqJson(opPath, {}, adminToken);
+      assert.equal(adminOp.status, 403, `Expected 403 for admin on ${opPath}`);
+    }
+    const adminSelectStore = await reqJson(
+      '/api/auth/select-store',
+      { method: 'POST', body: JSON.stringify({ storeId: 1 }) },
+      adminToken
+    );
+    assert.equal(adminSelectStore.status, 403);
+
+    const createAdmin2 = await reqJson(
+      '/api/users',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          username: 'admin2',
+          displayName: 'Second Admin',
+          password: 'AdminPass123!',
+          role: 'admin',
+          permissions: ['receiving', 'inventory', 'stocktake', 'sales', 'db_settings', 'user_mgmt'],
+          allStores: true,
+        }),
+      },
+      adminToken
+    );
+    assert.equal(createAdmin2.status, 201);
+    assert.deepEqual(createAdmin2.body.data.permissions, ['db_settings', 'user_mgmt']);
+    await reqJson(`/api/users/${createAdmin2.body.data.id}`, { method: 'DELETE' }, adminToken);
+
+    // Admin creates Store #2 (password-free) and rejects duplicate storeCode
+    const createS2 = await reqJson(
+      '/api/stores',
+      {
+        method: 'POST',
+        body: JSON.stringify({ storeCode: 'BRAT02', storeName: 'Bratislava Store' }),
+      },
+      adminToken
+    );
+    assert.equal(createS2.status, 201);
+    const s2Id = createS2.body.data.id;
+
+    const dupStore = await reqJson(
+      '/api/stores',
+      {
+        method: 'POST',
+        body: JSON.stringify({ storeCode: 'BRAT02', storeName: 'Dup' }),
+      },
+      adminToken
+    );
+    assert.equal(dupStore.status, 409);
+
+    // 4. Create Staff account `clerk01` assigned ONLY to Store #2 (BRAT02) with ONLY ['receiving', 'stocktake']
+    const createClerk = await reqJson(
+      '/api/users',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          username: 'clerk01',
+          displayName: 'Bratislava Clerk',
+          password: 'ClerkPass123!',
+          role: 'staff',
+          permissions: ['receiving', 'stocktake'],
+          allStores: false,
+          assignedStoreIds: [s2Id],
+          isActive: true,
+        }),
+      },
+      adminToken
+    );
+    assert.equal(createClerk.status, 201);
+    const clerkId = createClerk.body.data.id;
+
+    // 5. Wrong password rejected with 401; valid user login starts with currentStore = null and filtered availableStores
+    const badLogin = await reqJson(
+      '/api/auth/login',
+      { method: 'POST', body: JSON.stringify({ username: 'clerk01', password: 'WrongPassword' }) },
+      null
+    );
+    assert.equal(badLogin.status, 401);
+
+    const clerkLogin = await reqJson(
+      '/api/auth/login',
+      { method: 'POST', body: JSON.stringify({ username: 'clerk01', password: 'ClerkPass123!' }) },
+      null
+    );
+    assert.equal(clerkLogin.status, 200);
+    const clerkToken = clerkLogin.body.data.token;
+    assert.equal(clerkLogin.body.data.currentStore, null);
+    assert.equal(clerkLogin.body.data.availableStores.length, 1);
+    assert.equal(clerkLogin.body.data.availableStores[0].storeCode, 'BRAT02');
+
+    // 6. Accessing store-scoped endpoints before selecting a store returns 403; selecting unassigned MAIN01 returns 403
+    const beforeSelect = await reqJson('/api/stocktakes', {}, clerkToken);
+    assert.equal(beforeSelect.status, 403);
+    assert.equal(beforeSelect.body.code, 40300);
+
+    const forbiddenStoreSelect = await reqJson(
+      '/api/auth/select-store',
+      { method: 'POST', body: JSON.stringify({ storeId: 1 }) },
+      clerkToken
+    );
+    assert.equal(forbiddenStoreSelect.status, 403);
+
+    const okStoreSelect = await reqJson(
+      '/api/auth/select-store',
+      { method: 'POST', body: JSON.stringify({ storeId: s2Id }) },
+      clerkToken
+    );
+    assert.equal(okStoreSelect.status, 200);
+    assert.equal(okStoreSelect.body.data.currentStore.storeCode, 'BRAT02');
+
+    // 7. RBAC enforcement: clerk01 can use stocktakes & exact barcode lookup, but gets 403 on inventory list, sales, db-config, users, store POST
+    const stkCreate = await reqJson(
+      '/api/stocktakes',
+      { method: 'POST', body: JSON.stringify({ name: 'Clerk Stocktake' }) },
+      clerkToken
+    );
+    assert.equal(stkCreate.status, 201);
+    await reqJson(`/api/stocktakes/${stkCreate.body.data.Id}`, { method: 'DELETE' }, clerkToken);
+
+    const barcodeLookup = await reqJson('/api/g1/products/1000000000001', {}, clerkToken);
+    assert.equal(barcodeLookup.status, 200);
+
+    for (const forbiddenReq of [
+      { path: '/api/g1/products', method: 'GET' },
+      { path: '/api/sales/summary', method: 'GET' },
+      { path: '/api/ims/db-config', method: 'GET' },
+      { path: '/api/users', method: 'GET' },
+      { path: '/api/stores', method: 'POST', body: JSON.stringify({ storeCode: 'X01', storeName: 'X' }) },
+    ]) {
+      const denied = await reqJson(
+        forbiddenReq.path,
+        { method: forbiddenReq.method, body: forbiddenReq.body },
+        clerkToken
+      );
+      assert.equal(denied.status, 403, `Expected 403 for clerk01 ${forbiddenReq.method} ${forbiddenReq.path}`);
+    }
+
+    // 8. Last-admin protection: cannot delete self, demote/disable/strip user_mgmt from last active admin
+    const delSelf = await reqJson('/api/users/1', { method: 'DELETE' }, adminToken);
+    assert.equal(delSelf.status, 422);
+
+    const demoteLastAdmin = await reqJson(
+      '/api/users/1',
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ role: 'staff', permissions: ['receiving'] }),
+      },
+      adminToken
+    );
+    assert.equal(demoteLastAdmin.status, 422);
+
+    const disableLastAdmin = await reqJson(
+      '/api/users/1',
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: false }),
+      },
+      adminToken
+    );
+    assert.equal(disableLastAdmin.status, 422);
+
+    // 9. Per-store DB configs stay strictly isolated between MAIN01 and BRAT02 via storeId without admin entering a store
+    await reqJson(
+      '/api/ims/db-config',
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          storeId: 1,
+          sklad: { server: '10.10.1.11', port: 1433, database: 'SKLAD', user: 'u1', password: 'p1' },
+        }),
+      },
+      adminToken
+    );
+
+    await reqJson(
+      '/api/ims/db-config',
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          storeId: s2Id,
+          sklad: { server: '10.20.2.22', port: 1433, database: 'SKLAD', user: 'u2', password: 'p2' },
+        }),
+      },
+      adminToken
+    );
+
+    const cfgS2 = await reqJson(`/api/ims/db-config?storeId=${s2Id}`, {}, adminToken);
+    assert.equal(cfgS2.status, 200);
+    assert.equal(cfgS2.body.data.store.id, s2Id);
+    assert.equal(cfgS2.body.data.sklad.server, '10.20.2.22');
+
+    const cfgMain = await reqJson('/api/ims/db-config?storeId=1', {}, adminToken);
+    assert.equal(cfgMain.status, 200);
+    assert.equal(cfgMain.body.data.store.id, 1);
+    assert.equal(cfgMain.body.data.sklad.server, '10.10.1.11');
+
+    // Non-admin manager in store 1 cannot read, test, write, or reset ANY store DB config
+    for (const nonAdminDbReq of [
+      { path: '/api/ims/db-config', method: 'GET' },
+      { path: `/api/ims/db-config?storeId=${s2Id}`, method: 'GET' },
+      {
+        path: '/api/ims/db-config/test',
+        method: 'POST',
+        body: JSON.stringify({
+          target: 'sklad',
+          config: { server: '127.0.0.1', port: 1433, database: 'SKLAD', user: 'sa', password: 'p1' },
+        }),
+      },
+      {
+        path: '/api/ims/db-config',
+        method: 'PUT',
+        body: JSON.stringify({
+          sklad: { server: '10.10.1.99', port: 1433, database: 'SKLAD', user: 'u1', password: 'p1' },
+        }),
+      },
+      { path: '/api/ims/db-config', method: 'DELETE' },
+    ]) {
+      const deniedDb = await reqJson(
+        nonAdminDbReq.path,
+        { method: nonAdminDbReq.method, body: nonAdminDbReq.body },
+        authToken
+      );
+      assert.equal(
+        deniedDb.status,
+        403,
+        `Expected 403 for manager ${nonAdminDbReq.method} ${nonAdminDbReq.path}`
+      );
+    }
+
+    // Non-admin /api/ims/context omits targetInfo in sqlite-seed mode too
+    const mgrContext = await reqJson('/api/ims/context', {}, authToken);
+    assert.equal(mgrContext.status, 200);
+    assert.equal('targetInfo' in mgrContext.body.data.dbStatus.sklad, false);
+    assert.equal('targetInfo' in mgrContext.body.data.dbStatus.saledata, false);
+
+    // 9b. Self-service password change: verifies currentPassword, keeps active session, revokes sibling sessions, updates login credentials
+    const clerkSecondLogin = await reqJson(
+      '/api/auth/login',
+      { method: 'POST', body: JSON.stringify({ username: 'clerk01', password: 'ClerkPass123!' }) },
+      null
+    );
+    assert.equal(clerkSecondLogin.status, 200);
+    const clerkSecondToken = clerkSecondLogin.body.data.token;
+    await reqJson(
+      '/api/auth/select-store',
+      { method: 'POST', body: JSON.stringify({ storeId: s2Id }) },
+      clerkSecondToken
+    );
+
+    const wrongCurPw = await reqJson(
+      '/api/auth/change-password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword: 'WrongCurrentPassword', newPassword: 'ClerkNewPass456!' }),
+      },
+      clerkToken
+    );
+    assert.equal(wrongCurPw.status, 422);
+
+    const shortNewPw = await reqJson(
+      '/api/auth/change-password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword: 'ClerkPass123!', newPassword: '123' }),
+      },
+      clerkToken
+    );
+    assert.equal(shortNewPw.status, 422);
+
+    const okChangePw = await reqJson(
+      '/api/auth/change-password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword: 'ClerkPass123!', newPassword: 'ClerkNewPass456!' }),
+      },
+      clerkToken
+    );
+    assert.equal(okChangePw.status, 200);
+    assert.equal(okChangePw.body.data.changed, true);
+
+    // Current session stays valid while sibling session is revoked
+    const clerkStillValid = await reqJson('/api/stocktakes', {}, clerkToken);
+    assert.equal(clerkStillValid.status, 200);
+
+    const clerkSiblingRevoked = await reqJson('/api/stocktakes', {}, clerkSecondToken);
+    assert.equal(clerkSiblingRevoked.status, 401);
+
+    // Old password rejected, new password succeeds
+    const oldPwLogin = await reqJson(
+      '/api/auth/login',
+      { method: 'POST', body: JSON.stringify({ username: 'clerk01', password: 'ClerkPass123!' }) },
+      null
+    );
+    assert.equal(oldPwLogin.status, 401);
+
+    const newPwLogin = await reqJson(
+      '/api/auth/login',
+      { method: 'POST', body: JSON.stringify({ username: 'clerk01', password: 'ClerkNewPass456!' }) },
+      null
+    );
+    assert.equal(newPwLogin.status, 200);
+    await reqJson('/api/auth/logout', { method: 'POST' }, newPwLogin.body.data.token);
+
+    // 10. Deactivating clerk01 immediately revokes their session; admin login returns currentStore=null; logout revokes session cleanly
+    const deactivateClerk = await reqJson(
+      `/api/users/${clerkId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: false }),
+      },
+      adminToken
+    );
+    assert.equal(deactivateClerk.status, 200);
+    const clerkAfterDisable = await reqJson('/api/stocktakes', {}, clerkToken);
+    assert.equal(clerkAfterDisable.status, 401);
+
+    const admin2Res = await reqJson(
+      '/api/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ username: 'admin', password: 'AdminPass123!' }),
+      },
+      null
+    );
+    assert.equal(admin2Res.status, 200);
+    assert.equal(admin2Res.body.data.currentStore, null);
+    const tempToken = admin2Res.body.data.token;
+    const logoutRes = await reqJson('/api/auth/logout', { method: 'POST' }, tempToken);
+    assert.equal(logoutRes.status, 200);
+    const afterLogout = await reqJson('/api/stores', {}, tempToken);
+    assert.equal(afterLogout.status, 401);
+
+    // 11. Deleting BRAT02 succeeds; deleting last remaining store MAIN01 is blocked (422)
+    const delS2 = await reqJson(`/api/stores/${s2Id}`, { method: 'DELETE' }, adminToken);
+    assert.equal(delS2.status, 200);
+
+    const delLastStore = await reqJson('/api/stores/1', { method: 'DELETE' }, adminToken);
+    assert.equal(delLastStore.status, 422);
   });
 });

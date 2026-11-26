@@ -6,8 +6,6 @@ import {
   calculateOrderMetrics,
   calculateItemStatus,
   checkPriceDiscrepancy,
-  exportToCsv,
-  exportToXlsx,
   exportToPosImportXlsx,
   exportToAuditResultXlsx,
   getSamplePurchaseOrders,
@@ -23,39 +21,83 @@ import { PdaListView } from './components/PdaListView';
 import { ImportModal } from './components/ImportModal';
 import { ItemDetailDrawer } from './components/ItemDetailDrawer';
 import { AuditReportView } from './components/AuditReportView';
-import { ArrowLeft, Languages } from 'lucide-react';
-import { ImsProvider, useIms } from './context/ImsContext';
+import { ArrowLeft, Languages, Store, Loader2, ShieldAlert, User as UserIcon } from 'lucide-react';
+import { ImsProvider, StoreSummary, useIms } from './context/ImsContext';
 import { InventoryModule } from './components/ims/InventoryModule';
 import { StocktakeModule } from './components/ims/StocktakeModule';
 import { SalesAnalyticsModule } from './components/ims/SalesAnalyticsModule';
 import { DbSettingsModule } from './components/ims/DbSettingsModule';
+import { AdminWorkspace } from './components/ims/AdminWorkspace';
+import { StoreLoginScreen } from './components/ims/StoreLoginScreen';
+import { StoreSelectScreen } from './components/ims/StoreSelectScreen';
+import { StoreSwitchModal } from './components/ims/StoreSwitchModal';
+import { getFirstPermittedWorkspace, isWorkspacePermitted } from './core/auth/permissions';
 
-const STORAGE_ORDERS_KEY = 'purchase_reconciliation_v2_orders';
+const LEGACY_STORAGE_ORDERS_KEY = 'purchase_reconciliation_v2_orders';
 type WorkspaceTab = AppWorkspaceTab;
 
-function AppContent() {
-  const { lang, toggleLang, t, registerSettingsNavigator } = useIms();
-  const [workspace, setWorkspace] = useState<WorkspaceTab>('receiving');
+function getStoreOrdersKey(storeCode: string): string {
+  return `${LEGACY_STORAGE_ORDERS_KEY}_${storeCode}`;
+}
 
-  useEffect(() => {
-    registerSettingsNavigator(() => setWorkspace('settings'));
-  }, [registerSettingsNavigator]);
-
-  // Multiple purchase orders state
-  const [orders, setOrders] = useState<PurchaseOrder[]>(() => {
-    try {
-      const savedOrders = localStorage.getItem(STORAGE_ORDERS_KEY);
-      if (savedOrders) {
-        const parsed = JSON.parse(savedOrders);
+function loadStoreOrders(store: StoreSummary): PurchaseOrder[] {
+  const storeKey = getStoreOrdersKey(store.storeCode);
+  try {
+    const saved = localStorage.getItem(storeKey);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) return parsed;
+    }
+    // Migrate legacy single-store orders into first store automatically
+    if (store.id === 1) {
+      const legacy = localStorage.getItem(LEGACY_STORAGE_ORDERS_KEY);
+      if (legacy) {
+        const parsed = JSON.parse(legacy);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
-    } catch {
-      // fallback to sample
     }
-    return getSamplePurchaseOrders();
-  });
+  } catch {
+    // fallback to sample
+  }
+  return getSamplePurchaseOrders();
+}
 
-  // Navigation View: 'orders' (货单表格列表) | 'items' (货物明细) | 'scan' (只有Input框界面) | 'report' (差异审计)
+function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary | null }) {
+  const { lang, toggleLang, t, user, hasPerm, hasAnyPerm, registerSettingsNavigator } = useIms();
+  const firstPermittedWorkspace = getFirstPermittedWorkspace(user);
+  const [workspace, setWorkspace] = useState<WorkspaceTab>(() => getFirstPermittedWorkspace(user) || 'receiving');
+  const [isSwitchModalOpen, setIsSwitchModalOpen] = useState(false);
+
+  // Per-store purchase orders state
+  const [orders, setOrders] = useState<PurchaseOrder[]>(() =>
+    currentStore ? loadStoreOrders(currentStore) : []
+  );
+
+  // Reload orders cleanly whenever active store changes
+  useEffect(() => {
+    setOrders(currentStore ? loadStoreOrders(currentStore) : []);
+    setSelectedOrderId(null);
+    setSelectedItemForDetail(null);
+  }, [currentStore]);
+
+  // Keep workspace within permitted bounds when permissions update
+  useEffect(() => {
+    if (!isWorkspacePermitted(user, workspace)) {
+      const next = getFirstPermittedWorkspace(user);
+      if (next && next !== workspace) {
+        setWorkspace(next);
+      }
+    }
+  }, [user, workspace]);
+
+  useEffect(() => {
+    registerSettingsNavigator(() => {
+      if (user) {
+        setWorkspace('settings');
+      }
+    });
+  }, [registerSettingsNavigator, user]);
+
   const [activeView, setActiveView] = useState<AppActiveView>('orders');
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
@@ -72,14 +114,14 @@ function AppContent() {
   const [selectedItemForDetail, setSelectedItemForDetail] = useState<PurchaseItem | null>(null);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
-  // Sync state with localStorage
+  // Sync state with store-scoped localStorage
   useEffect(() => {
+    if (!currentStore) return;
     try {
-      localStorage.setItem(STORAGE_ORDERS_KEY, JSON.stringify(orders));
+      localStorage.setItem(getStoreOrdersKey(currentStore.storeCode), JSON.stringify(orders));
     } catch {}
-  }, [orders]);
+  }, [orders, currentStore]);
 
-  // Combined items from all orders (for global search / scan)
   const allOrdersItems: PurchaseItem[] = useMemo(() => {
     return orders.flatMap((order) =>
       order.items.map((item) => ({
@@ -90,13 +132,11 @@ function AppContent() {
     );
   }, [orders]);
 
-  // Currently selected order for items drill-down
   const selectedOrder = useMemo(() => {
     if (!selectedOrderId) return orders[0] || null;
     return orders.find((o) => o.id === selectedOrderId) || orders[0] || null;
   }, [orders, selectedOrderId]);
 
-  // Items of the selected order
   const currentOrderItems: PurchaseItem[] = useMemo(() => {
     if (!selectedOrder) return [];
     return selectedOrder.items.map((item) => ({
@@ -106,13 +146,11 @@ function AppContent() {
     }));
   }, [selectedOrder]);
 
-  // Metrics of current view
   const currentMetrics: OrderMetrics = useMemo(() => {
     const targetItems = activeView === 'items' ? currentOrderItems : allOrdersItems;
     return calculateOrderMetrics(targetItems, priceBasis);
   }, [activeView, currentOrderItems, allOrdersItems, priceBasis]);
 
-  // Filtered items of current order
   const filteredCurrentOrderItems = useMemo(() => {
     return currentOrderItems.filter((item) => {
       const status = calculateItemStatus(item.expectedQty, item.receivedQty);
@@ -131,7 +169,6 @@ function AppContent() {
     });
   }, [currentOrderItems, activeFilter, priceBasis]);
 
-  // Title for display in Sidebar
   const currentBatchTitle = useMemo(() => {
     if (activeView === 'items' && selectedOrder) {
       return selectedOrder.title;
@@ -139,13 +176,11 @@ function AppContent() {
     return `全部进货单 (${orders.length}张货单 · 共${allOrdersItems.length}款)`;
   }, [activeView, selectedOrder, orders.length, allOrdersItems.length]);
 
-  // Drill down from orders table to an order's items
   const handleSelectOrder = (order: PurchaseOrder) => {
     setSelectedOrderId(order.id);
     setActiveView('items');
   };
 
-  // Update a single item within its parent order
   const handleUpdateItem = (id: string, updates: Partial<PurchaseItem>) => {
     setOrders((prevOrders) =>
       prevOrders.map((order) => {
@@ -157,7 +192,6 @@ function AppContent() {
           return { ...item, ...updates };
         });
 
-        // Check if this order has just completed
         const wasDone = isOrderCompleted(order);
         const nextOrder: PurchaseOrder = {
           ...order,
@@ -183,7 +217,6 @@ function AppContent() {
     });
   };
 
-  // Delete an order
   const handleDeleteOrder = (orderId: string) => {
     if (confirm('确定要移除此进货对货单及其包含的全部商品吗？')) {
       setOrders((prev) => prev.filter((o) => o.id !== orderId));
@@ -194,12 +227,10 @@ function AppContent() {
     }
   };
 
-  // Barcode / Query Scan Match
   const handleScanMatch = (matchedItem: PurchaseItem, stepQty: number) => {
     const newQty = matchedItem.receivedQty + stepQty;
     const now = new Date().toLocaleTimeString();
 
-    // Update item in order
     handleUpdateItem(matchedItem.id, {
       receivedQty: newQty,
       lastScannedAt: now,
@@ -220,7 +251,6 @@ function AppContent() {
       timestamp: Date.now(),
     });
 
-    // Highlight row
     setHighlightedItemId(matchedItem.id);
     setTimeout(() => {
       const el = document.getElementById(`pda-item-${matchedItem.id}`);
@@ -234,7 +264,6 @@ function AppContent() {
     }, 2500);
   };
 
-  // 1. Export POS Import file (.xlsx) for a specific single order
   const handleExportSingleOrderPos = (order: PurchaseOrder) => {
     const blob = exportToPosImportXlsx(order.items, order.title);
     const url = URL.createObjectURL(blob);
@@ -245,7 +274,6 @@ function AppContent() {
     URL.revokeObjectURL(url);
   };
 
-  // 2. Export Audit Result file (.xlsx) for a specific single order
   const handleExportSingleOrderAudit = (order: PurchaseOrder) => {
     const blob = exportToAuditResultXlsx(order.items, order.title);
     const url = URL.createObjectURL(blob);
@@ -256,7 +284,6 @@ function AppContent() {
     URL.revokeObjectURL(url);
   };
 
-  // 3. Export POS Import file (.xlsx) for all orders
   const handleExportAllOrdersPos = () => {
     const blob = exportToPosImportXlsx(allOrdersItems, currentBatchTitle);
     const url = URL.createObjectURL(blob);
@@ -267,7 +294,6 @@ function AppContent() {
     URL.revokeObjectURL(url);
   };
 
-  // 4. Export Audit Result file (.xlsx) for all orders
   const handleExportAllOrdersAudit = () => {
     const blob = exportToAuditResultXlsx(allOrdersItems, currentBatchTitle);
     const url = URL.createObjectURL(blob);
@@ -278,7 +304,6 @@ function AppContent() {
     URL.revokeObjectURL(url);
   };
 
-  // Import items handler
   const handleImportItems = (
     newItems: PurchaseItem[],
     newBatchTitle: string,
@@ -347,7 +372,6 @@ function AppContent() {
     }
   };
 
-  // Jump from report view to item view
   const handleNavigateToItem = (itemId: string) => {
     const parentOrder = orders.find((o) => o.items.some((it) => it.id === itemId));
     if (parentOrder) {
@@ -364,17 +388,17 @@ function AppContent() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col text-slate-900 pb-20">
-      {/* Top Unified Header */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-2xs">
-        <div className="max-w-[1280px] mx-auto px-3 sm:px-4 lg:px-6 py-2 flex flex-wrap items-center justify-between gap-2">
+    <div className="h-[100dvh] w-full bg-slate-50 flex flex-col text-slate-900 overflow-hidden">
+      {/* Top Unified Header (Fixed height, never scrolls off screen) */}
+      <header className="shrink-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-2xs">
+        <div className="max-w-[1280px] mx-auto px-3 sm:px-4 lg:px-6 py-2 flex items-center justify-between gap-2">
           {/* Left: Brand Title + Current Workspace Label */}
-          <div className="flex items-center gap-2 overflow-x-auto">
-            <h1 className="text-sm font-bold text-slate-900 whitespace-nowrap">
+          <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+            <h1 className="text-sm font-bold text-slate-900 whitespace-nowrap truncate">
               {t('appTitle')}
             </h1>
-            <span className="text-slate-300 text-xs select-none">/</span>
-            <span className="text-xs font-semibold text-indigo-700 whitespace-nowrap">
+            <span className="text-slate-300 text-xs select-none hidden sm:inline">/</span>
+            <span className="text-xs font-semibold text-indigo-700 whitespace-nowrap hidden sm:inline">
               {workspace === 'receiving'
                 ? t('workspaceReceiving')
                 : workspace === 'inventory'
@@ -387,8 +411,35 @@ function AppContent() {
             </span>
           </div>
 
-          {/* Right: Bilingual Switcher */}
-          <div className="flex items-center gap-2">
+          {/* Right: User + Active Store Switcher + Bilingual Switcher */}
+          <div className="flex items-center gap-2 shrink-0">
+            {user && (
+              <span
+                data-testid="header-user-badge"
+                className="hidden sm:inline-flex items-center gap-1 text-xs font-medium text-slate-600 max-w-[120px] truncate whitespace-nowrap"
+                title={`${user.displayName} (${user.username})`}
+              >
+                <UserIcon className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="truncate">{user.displayName}</span>
+              </span>
+            )}
+
+            {currentStore && (
+              <span
+                data-testid="header-store-badge"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 whitespace-nowrap"
+                title={`${currentStore.storeName} (${currentStore.storeCode})`}
+              >
+                <Store className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                <span className="max-w-[110px] sm:max-w-[160px] truncate">
+                  {currentStore.storeName}
+                </span>
+                <span className="font-mono-numbers text-[10px] text-slate-500 hidden md:inline">
+                  ({currentStore.storeCode})
+                </span>
+              </span>
+            )}
+
             <button
               type="button"
               onClick={toggleLang}
@@ -402,134 +453,136 @@ function AppContent() {
         </div>
       </header>
 
-      {/* Main Content Workspace */}
-      <main className="flex-1 max-w-[1280px] w-full mx-auto px-3 sm:px-4 lg:px-6 py-3 sm:py-4 space-y-4 flex flex-col">
-        {workspace === 'inventory' && <InventoryModule />}
-        {workspace === 'stocktake' && <StocktakeModule />}
-        {workspace === 'sales' && <SalesAnalyticsModule />}
-        {workspace === 'settings' && <DbSettingsModule />}
+      {/* Independent Scrollable Content Viewport — keeps <nav> perpetually pinned at bottom */}
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain pb-24">
+        <main className="max-w-[1280px] w-full mx-auto px-3 sm:px-4 lg:px-6 py-3 sm:py-4 space-y-4 flex flex-col">
+          {!firstPermittedWorkspace && (
+            <div className="bg-white rounded-xl border border-amber-200 p-8 text-center space-y-2">
+              <ShieldAlert className="w-7 h-7 text-amber-600 mx-auto" />
+              <p className="text-sm font-bold text-slate-900">{t('userNoPermAssigned')}</p>
+            </div>
+          )}
 
-        {workspace === 'receiving' && (
-          <>
-            {/* VIEW 1: 货单表格列表 (未完成在先，已完成按完成时间早到晚排序) */}
-            {activeView === 'orders' && (
-              <OrdersTableView
-                orders={orders}
-                onSelectOrder={handleSelectOrder}
-                onExportOrderPos={handleExportSingleOrderPos}
-                onExportOrderAudit={handleExportSingleOrderAudit}
-                onAddNewOrder={() => setIsImportModalOpen(true)}
-                onDeleteOrder={handleDeleteOrder}
-              />
-            )}
+          {workspace === 'inventory' && hasPerm('inventory') && <InventoryModule />}
+          {workspace === 'stocktake' && hasPerm('stocktake') && <StocktakeModule />}
+          {workspace === 'sales' && hasPerm('sales') && <SalesAnalyticsModule />}
+          {workspace === 'settings' && <DbSettingsModule />}
 
-            {/* VIEW 2: 对应货单中的货物信息 */}
-            {activeView === 'items' && selectedOrder && (
-              <div className="space-y-3 sm:space-y-4">
-                {/* Top Order Breadcrumb / Header */}
-                <div className="bg-white rounded-xl border border-slate-200 p-3 sm:p-4 shadow-2xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setActiveView('orders')}
-                      className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold"
-                      title="返回货单列表"
-                    >
-                      <ArrowLeft className="w-4 h-4" />
-                      <span>返回货单列表</span>
-                    </button>
-                    <span className="text-slate-300">|</span>
-                    <div>
-                      <h2 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
-                        <span>{selectedOrder.title}</span>
-                        {isOrderCompleted(selectedOrder) ? (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                            已全数齐套
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                            核验中
-                          </span>
-                        )}
-                      </h2>
-                      <p className="text-[11px] text-slate-500 mt-0.5">
-                        供应商: {selectedOrder.supplier || '-'} · 共 {selectedOrder.items.length} 款货物
-                        {selectedOrder.completedAt && ` · 完成时间: ${selectedOrder.completedAt}`}
-                      </p>
+          {workspace === 'receiving' && hasPerm('receiving') && (
+            <>
+              {activeView === 'orders' && (
+                <OrdersTableView
+                  orders={orders}
+                  onSelectOrder={handleSelectOrder}
+                  onExportOrderPos={handleExportSingleOrderPos}
+                  onExportOrderAudit={handleExportSingleOrderAudit}
+                  onAddNewOrder={() => setIsImportModalOpen(true)}
+                  onDeleteOrder={handleDeleteOrder}
+                />
+              )}
+
+              {activeView === 'items' && selectedOrder && (
+                <div className="space-y-3 sm:space-y-4">
+                  <div className="bg-white rounded-xl border border-slate-200 p-3 sm:p-4 shadow-2xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setActiveView('orders')}
+                        className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors flex items-center gap-1 text-xs font-semibold"
+                        title="返回货单列表"
+                      >
+                        <ArrowLeft className="w-4 h-4" />
+                        <span>返回货单列表</span>
+                      </button>
+                      <span className="text-slate-300">|</span>
+                      <div>
+                        <h2 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
+                          <span>{selectedOrder.title}</span>
+                          {isOrderCompleted(selectedOrder) ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              已全数齐套
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                              核验中
+                            </span>
+                          )}
+                        </h2>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          供应商: {selectedOrder.supplier || '-'} · 共 {selectedOrder.items.length} 款货物
+                          {selectedOrder.completedAt && ` · 完成时间: ${selectedOrder.completedAt}`}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <ExportDropdown
+                        onExportPos={() => handleExportSingleOrderPos(selectedOrder)}
+                        onExportAudit={() => handleExportSingleOrderAudit(selectedOrder)}
+                        label="导出此单 (.xlsx)"
+                        align="right"
+                      />
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 self-end sm:self-auto">
-                    <ExportDropdown
-                      onExportPos={() => handleExportSingleOrderPos(selectedOrder)}
-                      onExportAudit={() => handleExportSingleOrderAudit(selectedOrder)}
-                      label="导出此单 (.xlsx)"
-                      align="right"
-                    />
-                  </div>
+                  <MetricsOverview
+                    metrics={currentMetrics}
+                    priceBasis={priceBasis}
+                    onChangePriceBasis={setPriceBasis}
+                    activeFilter={activeFilter}
+                    onChangeFilter={setActiveFilter}
+                  />
+
+                  <ScannerBar
+                    items={currentOrderItems}
+                    onScanMatch={handleScanMatch}
+                    onOpenItemModal={(item) => setSelectedItemForDetail(item)}
+                    lastScannedItem={lastScannedItem}
+                  />
+
+                  <PdaListView
+                    items={filteredCurrentOrderItems}
+                    priceBasis={priceBasis}
+                    onUpdateItem={handleUpdateItem}
+                    onSelectItemForDetail={setSelectedItemForDetail}
+                    highlightedItemId={highlightedItemId}
+                  />
                 </div>
+              )}
 
-                {/* KPIs for this specific order */}
-                <MetricsOverview
-                  metrics={currentMetrics}
-                  priceBasis={priceBasis}
-                  onChangePriceBasis={setPriceBasis}
-                  activeFilter={activeFilter}
-                  onChangeFilter={setActiveFilter}
-                />
-
-                {/* Search / Scan Bar */}
-                <ScannerBar
-                  items={currentOrderItems}
+              {activeView === 'scan' && (
+                <QuickScanView
+                  items={allOrdersItems}
                   onScanMatch={handleScanMatch}
                   onOpenItemModal={(item) => setSelectedItemForDetail(item)}
                   lastScannedItem={lastScannedItem}
+                  onBackToOrders={() => setActiveView('orders')}
                 />
+              )}
 
-                {/* Items List */}
-                <PdaListView
-                  items={filteredCurrentOrderItems}
+              {activeView === 'report' && (
+                <AuditReportView
+                  items={allOrdersItems}
+                  metrics={currentMetrics}
                   priceBasis={priceBasis}
-                  onUpdateItem={handleUpdateItem}
-                  onSelectItemForDetail={setSelectedItemForDetail}
-                  highlightedItemId={highlightedItemId}
+                  onNavigateToItem={handleNavigateToItem}
+                  onExportPos={handleExportAllOrdersPos}
+                  onExportAudit={handleExportAllOrdersAudit}
                 />
-              </div>
-            )}
+              )}
+            </>
+          )}
+        </main>
+      </div>
 
-            {/* VIEW 3: 极速扫码查验 (只有这个Input框) */}
-            {activeView === 'scan' && (
-              <QuickScanView
-                items={allOrdersItems}
-                onScanMatch={handleScanMatch}
-                onOpenItemModal={(item) => setSelectedItemForDetail(item)}
-                lastScannedItem={lastScannedItem}
-                onBackToOrders={() => setActiveView('orders')}
-              />
-            )}
-
-            {/* VIEW 4: 差异审计报告 */}
-            {activeView === 'report' && (
-              <AuditReportView
-                items={allOrdersItems}
-                metrics={currentMetrics}
-                priceBasis={priceBasis}
-                onNavigateToItem={handleNavigateToItem}
-                onExportPos={handleExportAllOrdersPos}
-                onExportAudit={handleExportAllOrdersAudit}
-              />
-            )}
-          </>
-        )}
-      </main>
-
-      {/* Bottom Navigation Menu with Collapsible IMS Modules */}
+      {/* Bottom Navigation Menu — Perpetually Pinned */}
       <Sidebar
         activeOrdersCount={orders.filter((o) => !isOrderCompleted(o)).length}
         workspace={workspace}
         setWorkspace={setWorkspace}
         activeView={activeView}
         setActiveView={setActiveView}
+        onOpenStoreSwitch={() => setIsSwitchModalOpen(true)}
       />
 
       {/* Modals & Drawers */}
@@ -545,14 +598,48 @@ function AppContent() {
         onSave={handleUpdateItem}
         priceBasis={priceBasis}
       />
+
+      {currentStore && (
+        <StoreSwitchModal
+          isOpen={isSwitchModalOpen}
+          onClose={() => setIsSwitchModalOpen(false)}
+        />
+      )}
     </div>
   );
+}
+
+function AppGate() {
+  const { authReady, user, currentStore, t } = useIms();
+
+  if (!authReady) {
+    return (
+      <div className="min-h-[100dvh] bg-slate-50 flex items-center justify-center text-xs text-slate-500 gap-2">
+        <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
+        <span>{t('loading')}</span>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <StoreLoginScreen />;
+  }
+
+  if (user.role === 'admin') {
+    return <AdminWorkspace />;
+  }
+
+  if (!currentStore) {
+    return <StoreSelectScreen />;
+  }
+
+  return <AuthenticatedWorkspace currentStore={currentStore} />;
 }
 
 export default function App() {
   return (
     <ImsProvider>
-      <AppContent />
+      <AppGate />
     </ImsProvider>
   );
 }

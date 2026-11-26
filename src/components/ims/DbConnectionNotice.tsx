@@ -1,5 +1,5 @@
 import React from 'react';
-import { Database, RefreshCw, AlertTriangle, Settings } from 'lucide-react';
+import { Database, RefreshCw, AlertTriangle } from 'lucide-react';
 import { DbTargetStatus, useIms } from '../../context/ImsContext';
 
 interface DbConnectionNoticeProps {
@@ -7,7 +7,7 @@ interface DbConnectionNoticeProps {
 }
 
 export const DbConnectionNotice: React.FC<DbConnectionNoticeProps> = ({ targets }) => {
-  const { lang, t, checkingDb, refreshContext, openSettings } = useIms();
+  const { lang, t, checkingDb, refreshContext } = useIms();
   const failed = targets.filter((item) => !item.status.ok);
   if (failed.length === 0) return null;
 
@@ -31,18 +31,12 @@ export const DbConnectionNotice: React.FC<DbConnectionNoticeProps> = ({ targets 
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-bold text-slate-800">{name}</span>
-                  {status.targetInfo && (
-                    <span className="font-mono-numbers text-[11px] text-slate-500">
-                      {t('dbTargetLabel')}: {status.targetInfo.server || '—'}:
-                      {status.targetInfo.port || 1433} / {status.targetInfo.database || name}
-                    </span>
-                  )}
                 </div>
                 <p className="text-rose-700 font-medium leading-relaxed">
                   {status.reason ||
                     (lang === 'zh'
-                      ? `无法连接到门店 SQL Server (${name})，请检查数据库主机地址、端口与网络连通性。`
-                      : `Nepodarilo sa pripojiť k SQL Serveru (${name}). Skontrolujte hostiteľa a port.`)}
+                      ? `无法连接到门店 SQL Server (${name})，请联系系统管理员检查门店数据库连接配置。`
+                      : `Nepodarilo sa pripojiť k SQL Serveru (${name}). Kontaktujte správcu systému.`)}
                 </p>
               </div>
             ))}
@@ -51,18 +45,10 @@ export const DbConnectionNotice: React.FC<DbConnectionNoticeProps> = ({ targets 
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
             <p className="text-[11px] text-slate-500 leading-relaxed max-w-md">
               {lang === 'zh'
-                ? '可点击「前往连接设置」直接修改 SKLAD / SaleData 的 IP 地址、端口与账号密码，或在运行时环境变量中配置后重新检测。'
-                : 'Kliknite na «Nastaviť pripojenie» pre manuálnu úpravu adresy a účtu SQL Servera, alebo aktualizujte premenné prostredia.'}
+                ? '门店数据库连接参数仅由系统管理员（admin）在后台配置与调试，请联系管理员确认连接后重试。'
+                : 'Nastavenie databázy predajne môže upravovať iba správca (admin). Po oprave pripojenia kliknite na znova otestovať.'}
             </p>
             <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                onClick={openSettings}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 whitespace-nowrap"
-              >
-                <Settings className="w-3.5 h-3.5" />
-                <span>{t('dbGoToSettingsBtn')}</span>
-              </button>
               <button
                 type="button"
                 disabled={checkingDb}

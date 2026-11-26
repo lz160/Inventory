@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 
-export type ErrorCode = 40404 | 40901 | 42201 | 50000 | 50101;
+export type ErrorCode = 40100 | 40300 | 40404 | 40901 | 42201 | 50000 | 50101;
 
 export class AppError extends Error {
   public readonly httpStatus: number;
@@ -31,6 +31,13 @@ export function fail(res: Response, httpStatus: number, code: ErrorCode, message
   });
 }
 
+export function unauthorizedError(message = '未登录或会话已过期，请重新登录门店账号') {
+  return new AppError(401, 40100, message);
+}
+
+export function forbiddenError(message = '无权执行此操作') {
+  return new AppError(403, 40300, message);
+}
 
 export function notFound(message = '请求的资源不存在') {
   return new AppError(404, 40404, message);

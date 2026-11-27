@@ -219,37 +219,49 @@ export function cleanNumber(val: string | number | undefined | null): number {
   return isNaN(num) ? 0 : num;
 }
 
-/**
- * 解析用户从Excel或CSV复制粘贴的表格数据
- * 模板顺序：序号 品名 中文 单价 优惠价 条码 数量 货号 单价2 供应商
- */
+export const PURCHASE_IMPORT_HEADERS = [
+  '序号', '品名', '中文', '单价', '优惠价', '条码', '数量', '货号', '单价2', '供应商',
+];
+
+export function assertNotPurchaseAuditReport(header: string): void {
+  if (['应收数量', '实收数量', '数量差异'].every(label => header.includes(label))) {
+    throw new Error('差异核对报告不能导入。请使用标准 10 列货单或 POS 导出模板。');
+  }
+}
+
 export function parseImportText(rawText: string): PurchaseItem[] {
-  if (!rawText || !rawText.trim()) return [];
+  if (!rawText.trim()) return [];
 
-  const lines = rawText.trim().split(/\r?\n/);
+  const text = rawText.replace(/^\uFEFF/, '').replace(/^\s*\r?\n/, '');
+  const firstLine = text.split(/\r?\n/, 1)[0];
+  let rows: string[][];
+  if (firstLine.includes('\t') || firstLine.includes(',')) {
+    const delimiter = firstLine.includes('\t') ? '\t' : ',';
+    const book = XLSX.read(text, { type: 'string', raw: true, FS: delimiter });
+    rows = XLSX.utils.sheet_to_json<string[]>(book.Sheets[book.SheetNames[0]], {
+      header: 1, defval: '', blankrows: false,
+    });
+  } else {
+    rows = text.split(/\r?\n/).map(line => line.trim().split(/\s{2,}/));
+  }
+
   const result: PurchaseItem[] = [];
+  for (const [idx, row] of rows.entries()) {
+    const cols = row.map(value => String(value ?? '').trim());
+    while (cols.length && !cols.at(-1)) cols.pop();
+    if (cols.length < 2) continue;
 
-  for (let idx = 0; idx < lines.length; idx++) {
-    const line = lines[idx].trim();
-    if (!line) continue;
-
-    // 判断是Tab分隔 (TSV/Excel复制) 还是 逗号分隔 (CSV)
-    let cols: string[] = [];
-    if (line.includes('\t')) {
-      cols = line.split('\t').map(c => c.trim());
-    } else if (line.includes(',')) {
-      cols = line.split(',').map(c => c.trim().replace(/^["']|["']$/g, ''));
-    } else {
-      // 多个空格分隔
-      cols = line.split(/\s{2,}/).map(c => c.trim());
-    }
-
-    // 过滤标题行 (如果第一行包含'序号'或'品名')
-    if (idx === 0 && (cols[0]?.includes('序号') || cols[1]?.includes('品名') || cols.includes('条码'))) {
+    if (cols[0] === '序号') assertNotPurchaseAuditReport(cols.join('\t'));
+    if (cols[0] === '序号' || (idx === 0 && cols[1] === '品名')) {
+      if (cols.length !== PURCHASE_IMPORT_HEADERS.length ||
+        !PURCHASE_IMPORT_HEADERS.every((header, index) => cols[index] === header)) {
+        throw new Error('货单表头或列顺序不正确，请使用标准 10 列模板。');
+      }
       continue;
     }
-
-    if (cols.length < 2) continue;
+    if (cols.length > PURCHASE_IMPORT_HEADERS.length) {
+      throw new Error(`第 ${idx + 1} 行超过 10 列，请检查货单模板和列顺序。`);
+    }
 
     // 对应模板：0:序号 1:品名 2:中文 3:单价 4:优惠价 5:条码 6:数量 7:货号 8:单价2 9:供应商
     const seq = parseInt(cols[0], 10) || (result.length + 1);
@@ -258,7 +270,7 @@ export function parseImportText(rawText: string): PurchaseItem[] {
     const unitPrice = cleanNumber(cols[3]);
     const discountPrice = cleanNumber(cols[4]);
     const barcode = (cols[5] || '').replace(/['"]/g, '').trim();
-    const expectedQty = Math.max(0, parseInt(cols[6], 10) || cleanNumber(cols[6]) || 0);
+    const expectedQty = Math.max(0, cleanNumber(cols[6]));
     const itemNo = (cols[7] || '').trim();
     const unitPrice2 = cleanNumber(cols[8]);
     const supplier = (cols[9] || '').trim();
@@ -462,18 +474,7 @@ export function exportToXlsx(items: PurchaseItem[], batchTitle: string): Blob {
  * 包含所有商品（含实收为0的行）
  */
 export function exportToPosImportXlsx(items: PurchaseItem[], batchTitle: string): Blob {
-  const headers = [
-    '序号',
-    '品名',
-    '中文',
-    '单价',
-    '优惠价',
-    '条码',
-    '数量', // POS导入模板固定识别“数量”，填入实收件数
-    '货号',
-    '单价2',
-    '供应商'
-  ];
+  const headers = PURCHASE_IMPORT_HEADERS;
 
   const data = items.map(item => [
     item.seq,

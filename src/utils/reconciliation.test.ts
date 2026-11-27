@@ -7,6 +7,7 @@ import {
   calculateOrderMetrics,
   cleanNumber,
   parseImportText,
+  PURCHASE_IMPORT_HEADERS,
   getSamplePurchaseItems,
   PurchaseItem,
   sortPurchaseOrders,
@@ -73,6 +74,35 @@ test('parseImportText parses 10-column TSV/Excel copied lines', () => {
   assert.equal(items[0].itemNo, 'SKI-FTE');
   assert.equal(items[0].unitPrice2, 1150);
   assert.equal(items[0].supplier, '日韩社');
+});
+
+test('receiving import preserves fractional quantities and identifiers, and rejects mismatched columns', () => {
+  const row = ['1', '测试商品', '', '4', '0', '0012345678905', '1.5', '000087', '3.25', '供应商'];
+  const [item] = parseImportText([PURCHASE_IMPORT_HEADERS, row].map(cells => cells.join('\t')).join('\n'));
+  assert.equal(item.expectedQty, 1.5);
+  assert.equal(item.barcode, '0012345678905');
+  assert.equal(item.itemNo, '000087');
+
+  const headers = [...PURCHASE_IMPORT_HEADERS];
+  [headers[7], headers[8]] = [headers[8], headers[7]];
+  assert.throws(() => parseImportText(headers.join('\t')), /表头或列顺序/);
+});
+
+test('receiving import rejects an audit export and can import a fractional POS export', async () => {
+  const item = { ...getSamplePurchaseItems()[0], receivedQty: 1.75, barcode: '0012345678905', itemNo: '000087' };
+  for (const [exporter, canImport] of [[exportToPosImportXlsx, true], [exportToAuditResultXlsx, false]] as const) {
+    const blob = exporter([item], '测试');
+    const book = XLSX.read(new Uint8Array(await blob.arrayBuffer()), { type: 'array' });
+    const text = XLSX.utils.sheet_to_csv(book.Sheets[book.SheetNames[0]], { FS: '\t' });
+    if (canImport) {
+      const [row] = parseImportText(text);
+      assert.equal(row.expectedQty, 1.75);
+      assert.equal(row.barcode, item.barcode);
+      assert.equal(row.itemNo, item.itemNo);
+    } else {
+      assert.throws(() => parseImportText(text), /差异核对报告不能导入/);
+    }
+  }
 });
 
 test('calculateOrderMetrics aggregates values properly', () => {

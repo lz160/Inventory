@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, Upload, FileText, Sparkles, AlertCircle, Copy, Check, FileSpreadsheet } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { parseImportText, PurchaseItem, getSamplePurchaseItems } from '../utils/reconciliation';
+import { assertNotPurchaseAuditReport, parseImportText, PURCHASE_IMPORT_HEADERS, PurchaseItem, getSamplePurchaseItems } from '../utils/reconciliation';
 import { getAuthHeaders } from '../utils/imsApi';
 
 interface ImportModalProps {
@@ -29,7 +29,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
 
   if (!isOpen) return null;
 
-  const standardHeader = '序号\t品名\t中文\t单价\t优惠价\t条码\t数量\t货号\t单价2\t供应商';
+  const standardHeader = PURCHASE_IMPORT_HEADERS.join('\t');
 
   const handleCopyHeader = () => {
     navigator.clipboard.writeText(standardHeader);
@@ -51,6 +51,8 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setImportError(null);
+    setRawText('');
     const fileNameLower = file.name.toLowerCase();
     if (fileNameLower.endsWith('.xlsx') || fileNameLower.endsWith('.xls')) {
       const reader = new FileReader();
@@ -62,11 +64,12 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           if (firstSheetName) {
             const worksheet = workbook.Sheets[firstSheetName];
             const tsv = XLSX.utils.sheet_to_csv(worksheet, { FS: '\t' });
+            assertNotPurchaseAuditReport(tsv.split(/\r?\n/, 1)[0]);
             setRawText(tsv);
             setBatchTitle(file.name.replace(/\.[^/.]+$/, ''));
           }
-        } catch (err: any) {
-          alert('解析Excel文件失败，请确保文件格式完整有效');
+        } catch (err) {
+          setImportError(err instanceof Error ? err.message : '解析 Excel 文件失败，请检查文件格式。');
         }
       };
       reader.readAsArrayBuffer(file);
@@ -84,14 +87,14 @@ export const ImportModal: React.FC<ImportModalProps> = ({
   };
 
   const handleConfirmTextImport = async () => {
-    const parsed = parseImportText(rawText);
-    if (parsed.length === 0) {
-      alert('未能解析出有效的进货单商品，请确认已粘贴或输入包含 序号、品名、单价、条码、数量 等列的文本');
-      return;
-    }
     setIsImporting(true);
     setImportError(null);
     try {
+      const parsed = parseImportText(rawText);
+      if (parsed.length === 0) {
+        setImportError('没有可导入的商品。请填写标准 10 列模板后重试。');
+        return;
+      }
       if (await onImportItems(parsed, batchTitle || '新建进货批次', importMode)) onClose();
     } catch (err) {
       setImportError(err instanceof Error ? err.message : '进货单导入失败');
@@ -108,6 +111,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
     setIsImporting(true);
     setImportError(null);
     try {
+      assertNotPurchaseAuditReport(rawText.trimStart().split(/\r?\n/, 1)[0]);
       const headers = getAuthHeaders({ 'Content-Type': 'application/json' });
       const res = await fetch('/api/parse-invoice', {
         method: 'POST',

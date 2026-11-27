@@ -188,8 +188,9 @@ export const ItemDetailDrawer: React.FC<ItemDetailDrawerProps> = ({
                   <input
                     type="number"
                     min="0"
+                    step="any"
                     value={formData.receivedQty}
-                    onChange={(e) => handleChange('receivedQty', Math.max(0, parseInt(e.target.value, 10) || 0))}
+                    onChange={(e) => handleChange('receivedQty', Math.max(0, Number(e.target.value) || 0))}
                     className="w-12 text-center text-sm font-bold font-mono-numbers text-slate-900 bg-transparent focus:outline-none"
                     aria-label="实收数量"
                   />
@@ -236,8 +237,9 @@ export const ItemDetailDrawer: React.FC<ItemDetailDrawerProps> = ({
                 <input
                   type="number"
                   min="0"
+                  step="any"
                   value={formData.damagedQty || 0}
-                  onChange={(e) => handleChange('damagedQty', Math.max(0, parseInt(e.target.value, 10) || 0))}
+                  onChange={(e) => handleChange('damagedQty', Math.max(0, Number(e.target.value) || 0))}
                   className="w-16 px-2 py-0.5 bg-white border border-slate-300 rounded font-mono-numbers text-xs font-semibold text-rose-700 focus:outline-none"
                   aria-label="残损数量"
                 />

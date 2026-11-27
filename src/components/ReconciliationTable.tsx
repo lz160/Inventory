@@ -187,9 +187,10 @@ export const ReconciliationTable: React.FC<ReconciliationTableProps> = ({
                         <input
                           type="number"
                           min="0"
+                          step="any"
                           value={item.receivedQty}
                           onChange={(e) => {
-                            const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                            const val = Math.max(0, Number(e.target.value) || 0);
                             onUpdateItem(item.id, { receivedQty: val });
                           }}
                           className={`w-14 text-center py-1 font-mono-numbers font-bold text-sm rounded border focus:outline-none focus:ring-1 focus:ring-indigo-500 ${
@@ -234,9 +235,10 @@ export const ReconciliationTable: React.FC<ReconciliationTableProps> = ({
                     <input
                       type="number"
                       min="0"
+                      step="any"
                       value={item.damagedQty || 0}
                       onChange={(e) => {
-                        const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                        const val = Math.max(0, Number(e.target.value) || 0);
                         onUpdateItem(item.id, { damagedQty: val });
                       }}
                       className={`w-12 text-center py-1 font-mono-numbers text-xs rounded border focus:outline-none focus:ring-1 focus:ring-rose-500 ${

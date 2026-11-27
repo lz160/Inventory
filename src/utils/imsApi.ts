@@ -34,6 +34,37 @@ export function getAuthHeaders(extraHeaders?: HeadersInit): Headers {
   return headers;
 }
 
+export function parseImsEnvelope<T>(status: number, ok: boolean, text: string): T {
+  let payload: any = null;
+  const trimmed = text.trim();
+  if (trimmed) {
+    try {
+      payload = JSON.parse(trimmed);
+    } catch {
+      if (ok) {
+        throw new ImsApiError(status, 50000, '服务器返回了无效的数据格式');
+      }
+      payload = null;
+    }
+  }
+
+  if (!ok || (payload && typeof payload === 'object' && 'code' in payload && payload.code !== 0)) {
+    const errCode = Number(payload?.code || 50000);
+    const msg = payload?.message || payload?.error || `HTTP ${status} 请求失败`;
+    throw new ImsApiError(status, errCode, msg);
+  }
+
+  if (status === 204) {
+    return undefined as T;
+  }
+
+  if (!payload || typeof payload !== 'object' || !('code' in payload)) {
+    throw new ImsApiError(status, 50000, '服务器返回了无效的响应结构');
+  }
+
+  return payload.data as T;
+}
+
 export async function imsFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = getAuthHeaders(options.headers);
   if (options.body && !headers.has('Content-Type')) {
@@ -45,28 +76,14 @@ export async function imsFetch<T>(url: string, options: RequestInit = {}): Promi
     headers,
   });
 
-  let payload: any = null;
   const text = await res.text();
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = null;
-    }
-  }
 
   if (res.status === 401 && !url.startsWith('/api/auth/')) {
     inMemoryAuthToken = null;
     unauthorizedHandler?.();
   }
 
-  if (!res.ok || (payload && payload.code !== 0)) {
-    const errCode = Number(payload?.code || 50000);
-    const msg = payload?.message || payload?.error || `HTTP ${res.status} 请求失败`;
-    throw new ImsApiError(res.status, errCode, msg);
-  }
-
-  return payload?.data as T;
+  return parseImsEnvelope<T>(res.status, res.ok, text);
 }
 
 export async function downloadImsXlsx(url: string, fallbackFilename: string): Promise<void> {

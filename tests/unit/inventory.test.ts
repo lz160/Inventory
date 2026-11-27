@@ -16,6 +16,19 @@ import {
 } from '../../src/modules/inventory/excelTemplate';
 import { getInventoryTable, runWithStoreContext, validateMssqlConfig, probeMssqlTarget } from '../../src/core/db/pool';
 import type { DbOverrideRow } from '../../src/core/db/metaStore';
+import type { G1Product, LowStockRow } from '../../src/modules/inventory/types';
+import {
+  buildCreateProductBody,
+  buildEditProductPatch,
+  computeInventoryPageSummary,
+  computeLowStockSummary,
+  createEmptyProductForm,
+  createInitialEditForm,
+  filterLowStockRows,
+  hasCostData,
+  parsePipeProductName,
+  resolveProductDisplayLines,
+} from '../../src/modules/inventory/viewHelpers';
 
 describe('M1 Inventory Unit Tests', () => {
   it('AC-INV-03 & B-07/B-33: stock status is strictly mutually exclusive across in/low/out', () => {
@@ -163,4 +176,146 @@ describe('M1 Inventory Unit Tests', () => {
       else process.env.MSSQL_SKLAD_DATABASE = prevDb;
     }
   });
+
+  it('viewHelpers compute real KPI summary, filter low-stock rows, and build valid G1 patches', () => {
+    const baseProduct: G1Product = {
+      Nazov: 'Cola 500ml',
+      Cena: 1.23,
+      PovCena: 1.5,
+      Barcode: '8581000000001',
+      Mnozstvo: 1,
+      Kod: 'DRK-01',
+      Element: '',
+      Class: '',
+      Reserved: 0,
+      Surplus: 10,
+      VIPnoDiscount: 0,
+      barcode2nd: '8581000000099',
+      conv2ndtobarcode: 24,
+      barcodeType: 0,
+      DPHtype: 1,
+      PurchasePrice: 0.7,
+      Dozen: 12,
+      Box: 24,
+      menupackage: 'bal',
+      Picture: '',
+      Cena2: 0.8,
+      WarningAt: 5,
+      MoreSurplus: '',
+      ExpiryDate: '2027-01-01',
+      PurchaseCountry: 'SK',
+      Supplier: 'DrinkDist',
+      Companions: '',
+      NotNewForCloud: 1,
+      IsUpdateCloud: 0,
+      InstallDate: '2026-11-01T00:00:00.000Z',
+      Shelves: 4,
+      LastInstallQty: 24,
+      name_zh: '可乐 500ml',
+      category: 'beverage',
+    };
+    const lowProduct: G1Product = { ...baseProduct, Barcode: '8581000000002', Surplus: 3, WarningAt: 5, Cena: 2.46, Cena2: 1.0 };
+    const outProduct: G1Product = { ...baseProduct, Barcode: '8581000000003', Surplus: -2, WarningAt: 5, Cena: 0, Cena2: 0 };
+
+    const noCostPricedProduct: G1Product = { ...baseProduct, Barcode: '8581000000004', Surplus: 0, WarningAt: 5, Cena: 1.23, Cena2: 0 };
+
+    assert.equal(hasCostData(0), false);
+    assert.equal(hasCostData(-1), false);
+    assert.equal(hasCostData(null), false);
+    assert.equal(hasCostData(undefined), false);
+    assert.equal(hasCostData(Number.NaN), false);
+    assert.equal(hasCostData(0.01), true);
+    assert.equal(hasCostData(1.5), true);
+
+    const summary = computeInventoryPageSummary([baseProduct, lowProduct, outProduct, noCostPricedProduct], 42, 7);
+    assert.equal(summary.totalMatching, 42);
+    assert.equal(summary.lowStockTotal, 7);
+    assert.equal(summary.pageInCount, 1);
+    assert.equal(summary.pageLowCount, 1);
+    assert.equal(summary.pageOutCount, 2);
+    // Negative surplus is clamped to 0 for valuation: 10*1.23 + 3*2.46 = 19.68
+    assert.ok(Math.abs(summary.pageStockValueRetail - 19.68) < 1e-6);
+    assert.ok(Math.abs(summary.pageStockValueCost - 11.0) < 1e-6);
+    // Margin average excludes costless items (noCostPricedProduct has Cena2=0) and averages the 2 products with cost data: (0.2 + 0.5) / 2 = 0.35
+    assert.ok(Math.abs((summary.pageAvgNetMarginRate ?? 0) - 0.35) < 1e-6);
+
+    const lowRows: LowStockRow[] = [
+      { ...lowProduct, Gap: 2 },
+      { ...outProduct, Barcode: '8581000000009', Nazov: 'Chips', name_zh: '薯片', Supplier: 'SnackCo', Cena2: 1.5, Gap: 4 },
+    ];
+    assert.equal(filterLowStockRows(lowRows, '薯片', '').length, 1);
+    assert.equal(filterLowStockRows(lowRows, '', 'DrinkDist').length, 1);
+    const lowSum = computeLowStockSummary(lowRows);
+    assert.equal(lowSum.alertCount, 2);
+    assert.equal(lowSum.outOfStockCount, 1);
+    assert.equal(lowSum.totalGapQty, 6);
+    assert.ok(Math.abs(lowSum.estimatedRestockCost - (2 * 1.0 + 4 * 1.5)) < 1e-6);
+
+    const editForm = createInitialEditForm(baseProduct);
+    editForm.Shelves = '8';
+    editForm.Reserved = true;
+    const patch = buildEditProductPatch(editForm);
+    // Must pass backend editable whitelist cleanly and exclude Barcode/WarningAt/InstallDate
+    const sanitized = filterEditablePatch(patch);
+    assert.equal(sanitized.Shelves, 8);
+    assert.equal(sanitized.Reserved, 1);
+    assert.equal('WarningAt' in patch, false);
+
+    const createForm = createEmptyProductForm();
+    createForm.Barcode = '8582222222222';
+    createForm.Nazov = 'New SKU';
+    createForm.category = 'food_snack';
+    createForm.Cena = '3.69';
+    const body = buildCreateProductBody(createForm);
+    assert.equal(body.category, 'food_snack');
+    assert.equal(body.Cena, 3.69);
+  });
+
+  it('parsePipeProductName and resolveProductDisplayLines hide | and place trailing content on line 2', () => {
+    assert.deepEqual(parsePipeProductName('Dámske tričko | 女式纯棉T恤'), {
+      primary: 'Dámske tričko',
+      secondary: '女式纯棉T恤',
+    });
+    assert.deepEqual(parsePipeProductName('Coca-Cola|500ml'), {
+      primary: 'Coca-Cola',
+      secondary: '500ml',
+    });
+    assert.deepEqual(parsePipeProductName('Item A | Spec 1 | Spec 2'), {
+      primary: 'Item A',
+      secondary: 'Spec 1 Spec 2',
+    });
+    assert.deepEqual(parsePipeProductName('Trailing | '), {
+      primary: 'Trailing',
+      secondary: null,
+    });
+    assert.deepEqual(parsePipeProductName('| LeadingOnly'), {
+      primary: 'LeadingOnly',
+      secondary: null,
+    });
+    assert.deepEqual(parsePipeProductName('Plain Product'), {
+      primary: 'Plain Product',
+      secondary: null,
+    });
+    assert.deepEqual(parsePipeProductName(''), {
+      primary: '',
+      secondary: null,
+    });
+
+    assert.deepEqual(resolveProductDisplayLines('Dámske tričko | 女式T恤', '', 'zh'), {
+      line1: 'Dámske tričko',
+      line2: '女式T恤',
+      line3: null,
+    });
+    assert.deepEqual(resolveProductDisplayLines('Dámske tričko | 500ml', '女式T恤 | 纯棉', 'zh'), {
+      line1: '女式T恤',
+      line2: '纯棉',
+      line3: 'Dámske tričko 500ml',
+    });
+    assert.deepEqual(resolveProductDisplayLines('Dámske tričko | 500ml', '女式T恤', 'sk'), {
+      line1: 'Dámske tričko',
+      line2: '500ml',
+      line3: null,
+    });
+  });
 });
+

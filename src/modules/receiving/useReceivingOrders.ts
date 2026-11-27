@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ImsApiError, imsFetch } from '../../utils/imsApi';
 import type { PurchaseItem } from '../../utils/reconciliation';
+import { normalizeReceivingLineResult, normalizeReceivingOrder, normalizeReceivingOrders } from './normalize';
 import type { ChangeReceivingLine, ReceivingChanges, ReceivingLineResult, ReceivingMode, ReceivingOrder } from './types';
 
 function request<T>(storeId: number, path: string, options: RequestInit = {}): Promise<T> {
@@ -38,7 +39,8 @@ export function useReceivingOrders(storeId: number, visible: boolean) {
     read.current = controller;
     if (!loaded.current) setLoadState('loading');
     try {
-      const latest = await request<ReceivingOrder[]>(storeId, '/orders', { signal: controller.signal });
+      const raw = await request<unknown>(storeId, '/orders', { signal: controller.signal });
+      const latest = normalizeReceivingOrders(raw);
       if (!controller.signal.aborted) {
         setOrders(latest);
         loaded.current = true;
@@ -91,12 +93,17 @@ export function useReceivingOrders(storeId: number, visible: boolean) {
 
   function saveImport(items: PurchaseItem[], title: string, mode: ReceivingMode, order?: ReceivingOrder) {
     return enqueue(async () => {
-      const saved = await write<ReceivingOrder>(storeId, '/orders/import', 'POST', {
-        operationId: crypto.randomUUID(), items, title, mode, orderId: order?.id, version: order?.version,
+      const saved = normalizeReceivingOrder(
+        await write<unknown>(storeId, '/orders/import', 'POST', {
+          operationId: crypto.randomUUID(), items, title, mode, orderId: order?.id, version: order?.version,
+        })
+      );
+      setOrders((previous) => {
+        const safePrev = Array.isArray(previous) ? previous : [];
+        return safePrev.some((item) => item.id === saved.id)
+          ? safePrev.map((item) => item.id === saved.id ? saved : item)
+          : [...safePrev, saved];
       });
-      setOrders((previous) => previous.some((item) => item.id === saved.id)
-        ? previous.map((item) => item.id === saved.id ? saved : item)
-        : [...previous, saved]);
       return saved;
     });
   }
@@ -104,21 +111,24 @@ export function useReceivingOrders(storeId: number, visible: boolean) {
   function removeOrder(order: ReceivingOrder) {
     return enqueue(async () => {
       await write(storeId, `/orders/${order.id}`, 'DELETE', { version: order.version });
-      setOrders((previous) => previous.filter((item) => item.id !== order.id));
+      setOrders((previous) => (Array.isArray(previous) ? previous : []).filter((item) => item.id !== order.id));
     });
   }
 
   function saveLine(itemId: string, input: ChangeReceivingLine) {
     return enqueue(async () => {
-      const result = await write<ReceivingLineResult>(storeId, `/lines/${itemId}`, 'PATCH', input);
-      setOrders((previous) => previous.map((order) => {
+      const result: ReceivingLineResult = normalizeReceivingLineResult(
+        await write<unknown>(storeId, `/lines/${itemId}`, 'PATCH', input)
+      );
+      setOrders((previous) => (Array.isArray(previous) ? previous : []).map((order) => {
         if (order.id !== result.orderId) return order;
+        const safeItems = Array.isArray(order.items) ? order.items : [];
         return {
           ...order,
           // Keep destructive changes guarded when another device changed other lines.
           version: result.version === order.version + 1 ? result.version : order.version,
           completedAt: result.completedAt,
-          items: order.items.map((item) => item.id === itemId ? result.item : item),
+          items: safeItems.map((item) => item.id === itemId ? result.item : item),
         };
       }));
       return result.item;

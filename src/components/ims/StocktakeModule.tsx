@@ -11,6 +11,7 @@ import {
 import { useIms } from '../../context/ImsContext';
 import { downloadImsXlsx, formatQty } from '../../utils/imsApi';
 import { G1Product } from '../../modules/inventory/types';
+import { parsePipeProductName } from '../../modules/inventory/viewHelpers';
 import { StocktakeHead, StocktakeLine, StocktakeListRow } from '../../modules/stocktake/types';
 import { DbConnectionNotice } from './DbConnectionNotice';
 
@@ -410,7 +411,17 @@ export const StocktakeModule: React.FC = () => {
                   >
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div>
-                        <div className="text-sm font-bold text-slate-900">{hitProduct.Nazov}</div>
+                        {(() => {
+                          const parsed = parsePipeProductName(hitProduct.Nazov);
+                          return (
+                            <>
+                              <div className="text-sm font-bold text-slate-900">{parsed.primary || '—'}</div>
+                              {parsed.secondary && (
+                                <div className="text-xs text-slate-500 mt-0.5">{parsed.secondary}</div>
+                              )}
+                            </>
+                          );
+                        })()}
                         <div className="text-xs font-mono-numbers text-slate-500 mt-0.5">
                           {hitProduct.Barcode} · {t('stkSystemQty')}:{' '}
                           <strong className="text-slate-900">{formatQty(hitProduct.Surplus ?? 0)}</strong>
@@ -504,7 +515,19 @@ export const StocktakeModule: React.FC = () => {
                           <td className="py-2.5 px-3">{renderVarianceBadge(line.Variance)}</td>
                           <td className="py-2.5 px-3 font-mono-numbers text-slate-700">{line.Barcode}</td>
                           <td className="py-2.5 px-3 font-medium text-slate-900">
-                            {line.Nazov || '—'}
+                            {(() => {
+                              const parsed = parsePipeProductName(line.Nazov);
+                              return (
+                                <>
+                                  <div>{parsed.primary || '—'}</div>
+                                  {parsed.secondary && (
+                                    <div className="text-[11px] font-normal text-slate-500 mt-0.5">
+                                      {parsed.secondary}
+                                    </div>
+                                  )}
+                                </>
+                              );
+                            })()}
                             {line.Notes && <div className="text-[11px] text-slate-500">{line.Notes}</div>}
                           </td>
                           <td className="py-2.5 px-3 text-right font-mono-numbers whitespace-nowrap">

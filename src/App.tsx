@@ -79,24 +79,26 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }
   const [selectedItemForDetail, setSelectedItemForDetail] = useState<ReceivingLine | null>(null);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
+  const safeOrders = useMemo(() => (Array.isArray(orders) ? orders : []), [orders]);
+
   const allOrdersItems: ReceivingLine[] = useMemo(() => {
-    return orders.flatMap((order) =>
-      order.items.map((item) => ({
+    return safeOrders.flatMap((order) =>
+      (Array.isArray(order?.items) ? order.items : []).map((item) => ({
         ...item,
         orderId: order.id,
         orderTitle: order.title,
       }))
     );
-  }, [orders]);
+  }, [safeOrders]);
 
   const selectedOrder = useMemo(() => {
-    if (!selectedOrderId) return orders[0] || null;
-    return orders.find((o) => o.id === selectedOrderId) || orders[0] || null;
-  }, [orders, selectedOrderId]);
+    if (!selectedOrderId) return safeOrders[0] || null;
+    return safeOrders.find((o) => o.id === selectedOrderId) || safeOrders[0] || null;
+  }, [safeOrders, selectedOrderId]);
 
   const currentOrderItems: ReceivingLine[] = useMemo(() => {
     if (!selectedOrder) return [];
-    return selectedOrder.items.map((item) => ({
+    return (Array.isArray(selectedOrder.items) ? selectedOrder.items : []).map((item) => ({
       ...item,
       orderId: selectedOrder.id,
       orderTitle: selectedOrder.title,
@@ -130,8 +132,8 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }
     if (activeView === 'items' && selectedOrder) {
       return selectedOrder.title;
     }
-    return `全部进货单 (${orders.length}张货单 · 共${allOrdersItems.length}款)`;
-  }, [activeView, selectedOrder, orders.length, allOrdersItems.length]);
+    return `全部进货单 (${safeOrders.length}张货单 · 共${allOrdersItems.length}款)`;
+  }, [activeView, selectedOrder, safeOrders.length, allOrdersItems.length]);
 
   const handleSelectOrder = (order: PurchaseOrder) => {
     setSelectedOrderId(order.id);
@@ -149,7 +151,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }
   };
 
   const handleDeleteOrder = async (orderId: string) => {
-    const order = orders.find((entry) => entry.id === orderId);
+    const order = safeOrders.find((entry) => entry.id === orderId);
     if (!order || !confirm('确定要移除此进货对货单及其包含的全部商品吗？')) return;
     try {
       await removeOrder(order);
@@ -263,7 +265,9 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }
   };
 
   const handleNavigateToItem = (itemId: string) => {
-    const parentOrder = orders.find((o) => o.items.some((it) => it.id === itemId));
+    const parentOrder = safeOrders.find((o) =>
+      Array.isArray(o?.items) && o.items.some((it) => it.id === itemId)
+    );
     if (parentOrder) {
       setSelectedOrderId(parentOrder.id);
     }
@@ -371,7 +375,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }
             <>
               {activeView === 'orders' && (
                 <OrdersTableView
-                  orders={orders}
+                  orders={safeOrders}
                   onSelectOrder={handleSelectOrder}
                   onExportOrderPos={handleExportSingleOrderPos}
                   onExportOrderAudit={handleExportSingleOrderAudit}
@@ -408,7 +412,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }
                           )}
                         </h2>
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          供应商: {selectedOrder.supplier || '-'} · 共 {selectedOrder.items.length} 款货物
+                          供应商: {selectedOrder.supplier || '-'} · 共 {(Array.isArray(selectedOrder.items) ? selectedOrder.items : []).length} 款货物
                           {selectedOrder.completedAt && ` · 完成时间: ${selectedOrder.completedAt}`}
                         </p>
                       </div>
@@ -477,7 +481,7 @@ function AuthenticatedWorkspace({ currentStore }: { currentStore: StoreSummary }
 
       {/* Bottom Navigation Menu — Perpetually Pinned */}
       <Sidebar
-        activeOrdersCount={orders.filter((o) => !isOrderCompleted(o)).length}
+        activeOrdersCount={safeOrders.filter((o) => !isOrderCompleted(o)).length}
         workspace={workspace}
         setWorkspace={setWorkspace}
         activeView={activeView}

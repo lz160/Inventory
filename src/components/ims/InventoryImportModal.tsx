@@ -132,7 +132,7 @@ export const InventoryImportModal: React.FC<InventoryImportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-2xs flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[60] bg-slate-900/40 backdrop-blur-2xs flex items-center justify-center p-4">
       <div className="bg-white rounded-xl border border-slate-200 max-w-3xl w-full shadow-xl overflow-hidden flex flex-col max-h-[88vh]">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">

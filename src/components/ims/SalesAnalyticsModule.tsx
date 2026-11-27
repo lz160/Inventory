@@ -9,6 +9,7 @@ import {
 import { useIms } from '../../context/ImsContext';
 import { downloadImsXlsx, formatEur, formatQty } from '../../utils/imsApi';
 import { calculateVatMetrics } from '../../modules/inventory/validators';
+import { parsePipeProductName } from '../../modules/inventory/viewHelpers';
 import type { CategoryDef } from '../../modules/sales/category-rules';
 import { DbConnectionNotice } from './DbConnectionNotice';
 import {
@@ -548,7 +549,21 @@ export const SalesAnalyticsModule: React.FC = () => {
                     return (
                       <tr key={r.Barcode} className="hover:bg-slate-50">
                         <td className="py-2.5 px-3 font-mono-numbers text-slate-700">{r.Barcode}</td>
-                        <td className="py-2.5 px-3 font-medium text-slate-900">{r.Nazov ?? '—'}</td>
+                        <td className="py-2.5 px-3 font-medium text-slate-900">
+                          {(() => {
+                            const parsed = parsePipeProductName(r.Nazov);
+                            return (
+                              <>
+                                <div>{parsed.primary || '—'}</div>
+                                {parsed.secondary && (
+                                  <div className="text-[11px] font-normal text-slate-500 mt-0.5">
+                                    {parsed.secondary}
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </td>
                         <td className="py-2.5 px-3 text-right font-mono-numbers font-bold">{formatQty(r.SoldQty)}</td>
                         <td className="py-2.5 px-3 text-right font-mono-numbers">{formatEur(r.Revenue)}</td>
                         <td className="py-2.5 px-3 text-right font-mono-numbers">
@@ -590,7 +605,21 @@ export const SalesAnalyticsModule: React.FC = () => {
                   slowRows.map((r) => (
                     <tr key={r.Barcode} className="hover:bg-slate-50">
                       <td className="py-2.5 px-3 font-mono-numbers text-slate-700">{r.Barcode}</td>
-                      <td className="py-2.5 px-3 font-medium text-slate-900">{r.Nazov ?? '—'}</td>
+                      <td className="py-2.5 px-3 font-medium text-slate-900">
+                        {(() => {
+                          const parsed = parsePipeProductName(r.Nazov);
+                          return (
+                            <>
+                              <div>{parsed.primary || '—'}</div>
+                              {parsed.secondary && (
+                                <div className="text-[11px] font-normal text-slate-500 mt-0.5">
+                                  {parsed.secondary}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </td>
                       <td className="py-2.5 px-3 text-right font-mono-numbers font-bold">{formatQty(r.SoldQty)}</td>
                       <td className="py-2.5 px-3 text-right font-mono-numbers">{formatQty(r.Surplus)}</td>
                       <td className="py-2.5 px-3 text-right font-mono-numbers">{formatEur(r.Cena)}</td>
@@ -629,7 +658,21 @@ export const SalesAnalyticsModule: React.FC = () => {
                     return (
                       <tr key={r.Barcode} className={urgent ? 'bg-amber-50/70' : 'hover:bg-slate-50'}>
                         <td className="py-2.5 px-3 font-mono-numbers text-slate-700">{r.Barcode}</td>
-                        <td className="py-2.5 px-3 font-medium text-slate-900">{r.Nazov ?? '—'}</td>
+                        <td className="py-2.5 px-3 font-medium text-slate-900">
+                          {(() => {
+                            const parsed = parsePipeProductName(r.Nazov);
+                            return (
+                              <>
+                                <div>{parsed.primary || '—'}</div>
+                                {parsed.secondary && (
+                                  <div className="text-[11px] font-normal text-slate-500 mt-0.5">
+                                    {parsed.secondary}
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </td>
                         <td className="py-2.5 px-3 text-right font-mono-numbers">{formatQty(r.Surplus)}</td>
                         <td className="py-2.5 px-3 text-right font-mono-numbers">{r.DailyRate.toFixed(3)}</td>
                         <td
@@ -712,7 +755,17 @@ export const SalesAnalyticsModule: React.FC = () => {
                             />
                           </td>
                           <td className="py-2 px-2">
-                            <div className="font-medium text-slate-900">{r.Nazov || '—'}</div>
+                            {(() => {
+                              const parsed = parsePipeProductName(r.Nazov);
+                              return (
+                                <>
+                                  <div className="font-medium text-slate-900">{parsed.primary || '—'}</div>
+                                  {parsed.secondary && (
+                                    <div className="text-[11px] text-slate-500 mt-0.5">{parsed.secondary}</div>
+                                  )}
+                                </>
+                              );
+                            })()}
                             <div className="text-[11px] font-mono-numbers text-slate-500">{r.Barcode}</div>
                           </td>
                           <td className="py-2 px-2 text-right font-mono-numbers">{formatEur(r.Revenue)}</td>
